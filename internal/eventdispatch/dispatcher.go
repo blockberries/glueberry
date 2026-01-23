@@ -9,19 +9,25 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-// Event represents a connection state change event.
-type Event struct {
+// ConnectionEvent represents a connection state change event.
+// This is the same as the public glueberry.ConnectionEvent type.
+type ConnectionEvent struct {
 	PeerID    peer.ID
 	State     connection.ConnectionState
 	Error     error
 	Timestamp time.Time
 }
 
+// IsError returns true if this event represents an error condition.
+func (e ConnectionEvent) IsError() bool {
+	return e.Error != nil
+}
+
 // Dispatcher manages event emission to a buffered channel.
 // It implements non-blocking sends to prevent slow consumers from
 // blocking connection operations.
 type Dispatcher struct {
-	events chan Event
+	events chan ConnectionEvent
 	mu     sync.Mutex
 	closed bool
 }
@@ -29,7 +35,7 @@ type Dispatcher struct {
 // NewDispatcher creates a new event dispatcher with the given buffer size.
 func NewDispatcher(bufferSize int) *Dispatcher {
 	return &Dispatcher{
-		events: make(chan Event, bufferSize),
+		events: make(chan ConnectionEvent, bufferSize),
 	}
 }
 
@@ -43,8 +49,8 @@ func (d *Dispatcher) EmitEvent(event connection.Event) {
 	}
 	d.mu.Unlock()
 
-	// Convert to internal Event type
-	evt := Event{
+	// Convert to ConnectionEvent type
+	evt := ConnectionEvent{
 		PeerID:    event.PeerID,
 		State:     event.State,
 		Error:     event.Error,
@@ -63,7 +69,7 @@ func (d *Dispatcher) EmitEvent(event connection.Event) {
 
 // Events returns the events channel for the application to consume.
 // The channel is closed when the dispatcher is closed.
-func (d *Dispatcher) Events() <-chan Event {
+func (d *Dispatcher) Events() <-chan ConnectionEvent {
 	return d.events
 }
 

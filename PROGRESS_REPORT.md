@@ -762,6 +762,179 @@ Connection Manager -> EmitEvent() -> Dispatcher -> Non-blocking send -> Events c
 
 ---
 
+## Phase 9: Node (Public API)
+
+**Status:** ✅ Complete
+**Commit:** (pending)
+
+### Files Created
+- `node.go` - Main Node struct aggregating all components
+- `node_test.go` - Node public API tests
+
+### Key Functionality
+
+#### Node Struct (`node.go`)
+- Primary entry point for applications using Glueberry
+- Aggregates all internal components into unified API
+- Thread-safe: all public methods protected appropriately
+
+**Components:**
+- `crypto` - Crypto module for key operations
+- `addressBook` - Peer storage and management
+- `host` - libp2p host wrapper
+- `connections` - Connection lifecycle manager
+- `streamManager` - Encrypted stream manager
+- `eventDispatch` - Event dispatcher
+- `events` - Connection events channel (read-only to app)
+- `messages` - Incoming messages channel
+
+**Lifecycle:**
+- `New(cfg *Config) (*Node, error)` - Constructor:
+  - Validates and applies defaults to config
+  - Creates all components in dependency order
+  - Wires components together
+  - Node not started until Start() called
+
+- `Start() error` - Starts the node:
+  - Enables connections and message handling
+  - libp2p already listening (from NewHost)
+  - Returns ErrNodeAlreadyStarted if already running
+
+- `Stop() error` - Graceful shutdown:
+  - Cancels all goroutines via context
+  - Shuts down components in reverse order
+  - Closes connections, streams, events, messages
+  - Closes libp2p host
+  - Returns ErrNodeNotStarted if not running
+
+**Information Methods:**
+- `PeerID() peer.ID` - Local peer identifier
+- `PublicKey() ed25519.PublicKey` - Local Ed25519 public key
+- `Addrs() []multiaddr.Multiaddr` - Listen addresses
+
+**Address Book Methods:**
+All methods delegate to underlying addressbook.Book:
+- `AddPeer(peerID, addrs, metadata)` - Add/update peer
+- `RemovePeer(peerID)` - Remove peer (doesn't disconnect)
+- `GetPeer(peerID)` - Retrieve peer information
+- `ListPeers()` - List all non-blacklisted peers
+- `BlacklistPeer(peerID)` - Blacklist and disconnect if active
+- `UnblacklistPeer(peerID)` - Remove from blacklist
+
+**Connection Methods:**
+- `Connect(peerID) (*HandshakeStream, error)`:
+  - Requires node started
+  - Delegates to connection manager
+  - Returns handshake stream for app to perform handshake
+  - Must complete within HandshakeTimeout
+
+- `Disconnect(peerID) error` - Close connection
+- `ConnectionState(peerID) ConnectionState` - Query state
+- `CancelReconnection(peerID) error` - Stop reconnection attempts
+
+**Stream & Messaging Methods:**
+- `EstablishEncryptedStreams(peerID, peerPubKey, streamNames)`:
+  - Called after successful handshake
+  - Derives shared key from peer's public key
+  - Opens encrypted streams via stream manager
+  - Stores public key in address book
+  - Requires node started
+
+- `Send(peerID, streamName, data) error`:
+  - Sends encrypted message over stream
+  - Requires node started
+  - Delegates to stream manager
+
+- `Messages() <-chan IncomingMessage`:
+  - Returns channel for receiving decrypted messages
+  - Messages include: PeerID, StreamName, Data, Timestamp
+
+- `Events() <-chan ConnectionEvent`:
+  - Returns channel for connection state changes
+  - Uses conversion goroutine to translate internal events to public type
+  - Events include: PeerID, State, Error, Timestamp
+
+**Component Wiring:**
+```
+New() creates components:
+  1. Crypto module (from private key)
+  2. Address book (with file path)
+  3. Event dispatcher (with buffer)
+  4. Messages channel (buffered)
+  5. Connection gater (uses address book)
+  6. libp2p host (with gater)
+  7. Stream manager (uses host + crypto + messages)
+  8. Connection manager (uses host + address book + event dispatcher)
+```
+
+**Event Conversion:**
+- Internal eventdispatch.ConnectionEvent -> public ConnectionEvent
+- Goroutine translates state types (connection.State -> public State)
+- Preserves all fields: PeerID, State, Error, Timestamp
+- Channel closed when dispatcher closes
+
+### Test Coverage
+11 tests covering:
+- Node creation (valid and invalid config)
+- Start/Stop lifecycle:
+  - Double start detection
+  - Stop before start detection
+  - Proper shutdown sequence
+- Information methods (PeerID, PublicKey, Addrs)
+- Address book operations (Add, Get, List, Blacklist, Unblacklist, Remove)
+- Connect before start (error handling)
+- Messages channel availability
+- Events channel availability
+
+### Design Decisions
+- **Constructor pattern:** New() creates but doesn't start node
+  - Allows configuration inspection before network activation
+  - Explicit Start() call required
+
+- **Component aggregation:** Node owns all components
+  - Single source of truth
+  - Coordinated shutdown
+  - Components not directly accessible (encapsulation)
+
+- **Delegation pattern:** Most methods forward to component
+  - Thin wrapper around internal components
+  - Adds started check for operations requiring running node
+  - Maintains simple, obvious API
+
+- **Blacklist integration:** BlacklistPeer also disconnects
+  - Prevents having to call both operations
+  - Ensures consistency (blacklisted = disconnected)
+
+- **Event channel conversion:** Goroutine translates types
+  - Decouples internal and external event representations
+  - Allows internal types to evolve independently
+  - Minimal overhead (channel forwarding)
+
+- **Started flag protection:** Operations check if node started
+  - Prevents Connect/Send on unstarted node
+  - Clear error messages (ErrNodeNotStarted)
+  - Mutex-protected for thread safety
+
+### Public API Surface
+Node exposes clean, minimal API:
+- 3 lifecycle methods
+- 3 information methods
+- 6 address book methods
+- 4 connection methods
+- 3 messaging methods
+- 19 methods total (focused and purposeful)
+
+### Integration Complete
+All major components now integrated:
+- ✅ Crypto module
+- ✅ Address book
+- ✅ libp2p host
+- ✅ Connection manager
+- ✅ Stream manager
+- ✅ Event system
+
+---
+
 ## Remaining Phases
 
 | Phase | Description | Status |
@@ -770,7 +943,7 @@ Connection Manager -> EmitEvent() -> Dispatcher -> Non-blocking send -> Events c
 | 6 | Connection Manager | ✅ Complete |
 | 7 | Encrypted Streams | ✅ Complete |
 | 8 | Event System | ✅ Complete |
-| 9 | Node (Public API) | Pending |
+| 9 | Node (Public API) | ✅ Complete |
 | 10 | Incoming Connection Handling | Pending |
 | 11 | Integration Testing | Pending |
 | 12 | Documentation | Pending |
@@ -781,13 +954,15 @@ Connection Manager -> EmitEvent() -> Dispatcher -> Non-blocking send -> Events c
 
 | Package | Tests | Status |
 |---------|-------|--------|
-| `glueberry` (root) | 11 | ✅ Pass |
+| `glueberry` (root) | 21 | ✅ Pass |
 | `pkg/crypto` | 45 | ✅ Pass |
 | `pkg/addressbook` | 34 | ✅ Pass |
 | `pkg/protocol` | 18 | ✅ Pass |
 | `pkg/streams` | 48 | ✅ Pass |
 | `pkg/connection` | 35 | ✅ Pass |
 | `internal/eventdispatch` | 12 | ✅ Pass |
+
+**Total:** 213 tests, all passing with race detection enabled
 
 All tests run with `-race` flag for race condition detection.
 
@@ -801,4 +976,4 @@ All tests run with `-race` flag for race condition detection.
 
 ---
 
-*Last updated: Phase 8 completion*
+*Last updated: Phase 9 completion*

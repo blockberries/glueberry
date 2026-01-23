@@ -73,8 +73,8 @@ func TestDispatcher_EmitEvent_Multiple(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerID)
 
 	// Emit multiple events
-	numEvents := 5
-	for i := 0; i < numEvents; i++ {
+	numConnectionEvents := 5
+	for i := 0; i < numConnectionEvents; i++ {
 		d.EmitEvent(connection.Event{
 			PeerID:    peerID,
 			State:     connection.ConnectionState(i),
@@ -83,10 +83,10 @@ func TestDispatcher_EmitEvent_Multiple(t *testing.T) {
 	}
 
 	// Receive all events
-	for i := 0; i < numEvents; i++ {
+	for i := 0; i < numConnectionEvents; i++ {
 		select {
 		case <-d.Events():
-			// Event received
+			// ConnectionEvent received
 		case <-time.After(1 * time.Second):
 			t.Fatalf("timeout waiting for event %d", i)
 		}
@@ -145,7 +145,7 @@ func TestDispatcher_Close(t *testing.T) {
 		t.Error("dispatcher should be closed after Close()")
 	}
 
-	// Events channel should be closed
+	// ConnectionEvents channel should be closed
 	select {
 	case _, ok := <-d.Events():
 		if ok {
@@ -228,7 +228,7 @@ func TestDispatcher_Concurrent(t *testing.T) {
 	// We don't verify count due to potential drops, but no panic is success
 }
 
-func TestDispatcher_EventConversion(t *testing.T) {
+func TestDispatcher_ConnectionEventConversion(t *testing.T) {
 	d := NewDispatcher(10)
 	defer d.Close()
 
