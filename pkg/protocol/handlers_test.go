@@ -20,22 +20,22 @@ type mockConnForHandlers struct {
 	remotePeer peer.ID
 }
 
-func (m *mockConnForHandlers) Close() error                           { return nil }
-func (m *mockConnForHandlers) IsClosed() bool                         { return false }
-func (m *mockConnForHandlers) LocalPeer() peer.ID                     { return "" }
-func (m *mockConnForHandlers) RemotePeer() peer.ID                    { return m.remotePeer }
-func (m *mockConnForHandlers) LocalMultiaddr() multiaddr.Multiaddr    { return nil }
-func (m *mockConnForHandlers) RemoteMultiaddr() multiaddr.Multiaddr   { return nil }
-func (m *mockConnForHandlers) LocalPrivateKey() libp2pcrypto.PrivKey  { return nil }
-func (m *mockConnForHandlers) RemotePublicKey() libp2pcrypto.PubKey   { return nil }
-func (m *mockConnForHandlers) ConnState() network.ConnectionState     { return network.ConnectionState{} }
-func (m *mockConnForHandlers) Scope() network.ConnScope               { return nil }
-func (m *mockConnForHandlers) Stat() network.ConnStats                { return network.ConnStats{} }
-func (m *mockConnForHandlers) ID() string                             { return "test-conn" }
+func (m *mockConnForHandlers) Close() error                                          { return nil }
+func (m *mockConnForHandlers) IsClosed() bool                                        { return false }
+func (m *mockConnForHandlers) LocalPeer() peer.ID                                    { return "" }
+func (m *mockConnForHandlers) RemotePeer() peer.ID                                   { return m.remotePeer }
+func (m *mockConnForHandlers) LocalMultiaddr() multiaddr.Multiaddr                   { return nil }
+func (m *mockConnForHandlers) RemoteMultiaddr() multiaddr.Multiaddr                  { return nil }
+func (m *mockConnForHandlers) LocalPrivateKey() libp2pcrypto.PrivKey                 { return nil }
+func (m *mockConnForHandlers) RemotePublicKey() libp2pcrypto.PubKey                  { return nil }
+func (m *mockConnForHandlers) ConnState() network.ConnectionState                    { return network.ConnectionState{} }
+func (m *mockConnForHandlers) Scope() network.ConnScope                              { return nil }
+func (m *mockConnForHandlers) Stat() network.ConnStats                               { return network.ConnStats{} }
+func (m *mockConnForHandlers) ID() string                                            { return "test-conn" }
 func (m *mockConnForHandlers) NewStream(ctx context.Context) (network.Stream, error) { return nil, nil }
-func (m *mockConnForHandlers) GetStreams() []network.Stream           { return nil }
-func (m *mockConnForHandlers) CloseWithError(code network.ConnErrorCode) error { return nil }
-func (m *mockConnForHandlers) As(interface{}) bool                    { return false }
+func (m *mockConnForHandlers) GetStreams() []network.Stream                          { return nil }
+func (m *mockConnForHandlers) CloseWithError(code network.ConnErrorCode) error       { return nil }
+func (m *mockConnForHandlers) As(interface{}) bool                                   { return false }
 
 // mockStreamWithConn extends mockStream with Conn() method
 type mockStreamWithConn struct {
@@ -119,11 +119,11 @@ func (m *mockStreamWithConn) CloseRead() error {
 	return nil
 }
 
-func (m *mockStreamWithConn) ID() string                     { return "test-stream" }
-func (m *mockStreamWithConn) Protocol() protocol.ID          { return "/test/1.0.0" }
+func (m *mockStreamWithConn) ID() string                       { return "test-stream" }
+func (m *mockStreamWithConn) Protocol() protocol.ID            { return "/test/1.0.0" }
 func (m *mockStreamWithConn) SetProtocol(id protocol.ID) error { return nil }
-func (m *mockStreamWithConn) Stat() network.Stats            { return network.Stats{} }
-func (m *mockStreamWithConn) Scope() network.StreamScope     { return nil }
+func (m *mockStreamWithConn) Stat() network.Stats              { return network.Stats{} }
+func (m *mockStreamWithConn) Scope() network.StreamScope       { return nil }
 
 func (m *mockStreamWithConn) Conn() network.Conn {
 	return &mockConnForHandlers{remotePeer: m.remotePeer}

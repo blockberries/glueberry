@@ -31,7 +31,8 @@ func NewHandshakeStream(stream network.Stream, timeout time.Duration) *Handshake
 	deadline := time.Now().Add(timeout)
 
 	// Set deadline on the underlying stream
-	stream.SetDeadline(deadline)
+	// Ignore error as we also check deadline manually
+	_ = stream.SetDeadline(deadline)
 
 	return &HandshakeStream{
 		stream:   stream,

@@ -25,25 +25,23 @@ type Node struct {
 	config *Config
 
 	// Core components
-	crypto         *crypto.Module
-	addressBook    *addressbook.Book
-	host           *protocol.Host
-	connections    *connection.Manager
-	streamManager  *streams.Manager
-	eventDispatch  *eventdispatch.Dispatcher
+	crypto        *crypto.Module
+	addressBook   *addressbook.Book
+	host          *protocol.Host
+	connections   *connection.Manager
+	streamManager *streams.Manager
+	eventDispatch *eventdispatch.Dispatcher
 
 	// Channels
-	events            <-chan eventdispatch.ConnectionEvent
-	messages          chan streams.IncomingMessage
+	events             <-chan eventdispatch.ConnectionEvent
+	messages           chan streams.IncomingMessage
 	incomingHandshakes chan protocol.IncomingHandshake
 
 	// Lifecycle
-	ctx      context.Context
-	cancel   context.CancelFunc
-	started  bool
-	startMu  sync.Mutex
-
-	mu sync.RWMutex
+	ctx     context.Context
+	cancel  context.CancelFunc
+	started bool
+	startMu sync.Mutex
 }
 
 // New creates a new Glueberry node with the given configuration.
@@ -224,7 +222,7 @@ func (n *Node) BlacklistPeer(peerID peer.ID) error {
 
 	// Disconnect if currently connected
 	if n.connections.GetState(peerID).IsActive() {
-		n.connections.Disconnect(peerID)
+		_ = n.connections.Disconnect(peerID) // Ignore error - best effort disconnect
 	}
 
 	return nil
@@ -305,28 +303,24 @@ func (n *Node) EstablishEncryptedStreams(
 
 	// Register handlers for incoming encrypted streams
 	// This allows the remote peer to open streams to us
-	n.registerIncomingStreamHandlers(peerID, streamNames, sharedKey)
+	n.registerIncomingStreamHandlers(streamNames)
 
 	// Establish encrypted streams via stream manager
 	if err := n.streamManager.EstablishStreams(peerID, peerPubKey, streamNames); err != nil {
 		return err
 	}
 
-	// Store public key in address book
-	if err := n.addressBook.UpdatePublicKey(peerID, peerPubKey); err != nil {
-		// Log but don't fail - streams are already established
-	}
+	// Store public key in address book (ignore error - not critical)
+	_ = n.addressBook.UpdatePublicKey(peerID, peerPubKey)
 
-	// Update connection state to Established
-	if err := n.connections.MarkEstablished(peerID); err != nil {
-		// Log but don't fail - streams are already established
-	}
+	// Update connection state to Established (ignore error - streams already established)
+	_ = n.connections.MarkEstablished(peerID)
 
 	return nil
 }
 
 // registerIncomingStreamHandlers registers protocol handlers for incoming encrypted streams.
-func (n *Node) registerIncomingStreamHandlers(peerID peer.ID, streamNames []string, sharedKey []byte) {
+func (n *Node) registerIncomingStreamHandlers(streamNames []string) {
 	for _, streamName := range streamNames {
 		protoID := protocol.StreamProtocolID(streamName)
 
@@ -342,14 +336,14 @@ func (n *Node) registerIncomingStreamHandlers(peerID peer.ID, streamNames []stri
 			key := n.connections.GetSharedKey(remotePeerID)
 			if key == nil {
 				// No shared key - reject stream
-				stream.Reset()
+				_ = stream.Reset() // Ignore error - rejecting stream
 				return
 			}
 
 			// Accept the incoming stream
 			if err := n.streamManager.HandleIncomingStream(remotePeerID, streamName, stream, key); err != nil {
 				// Failed to create encrypted stream
-				stream.Reset()
+				_ = stream.Reset() // Ignore error - error path
 				return
 			}
 		}

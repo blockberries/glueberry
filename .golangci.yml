@@ -1,0 +1,70 @@
+run:
+  timeout: 5m
+  tests: true
+  build-tags: []
+
+linters:
+  enable:
+    - errcheck      # Check for unchecked errors
+    - gosimple      # Simplify code
+    - govet         # Vet examines Go source code
+    - ineffassign   # Detect ineffectual assignments
+    - staticcheck   # Advanced static analysis
+    - unused        # Check for unused code
+    - gofmt         # Check formatting
+    - goimports     # Check imports
+    - misspell      # Check for misspelled words
+    - unconvert     # Remove unnecessary type conversions
+    - gosec         # Security checks
+    - nilerr        # Check for nil error returns
+  disable:
+    - unparam       # Disabled - some false positives in handlers
+
+linters-settings:
+  errcheck:
+    check-blank: false
+    check-type-assertions: false
+    exclude-functions:
+      - (*database/sql.Rows).Close
+      - (*database/sql.DB).Close
+
+  govet:
+    disable:
+      - fieldalignment  # Struct field optimization - not critical
+      - shadow          # Variable shadowing - acceptable in many cases
+
+  gofmt:
+    simplify: true
+
+  staticcheck:
+    checks: ["all"]
+
+  gosec:
+    excludes:
+      - G404  # Weak random number generator (crypto/rand is used where needed)
+
+  unparam:
+    check-exported: false
+
+issues:
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - gosec
+        - unparam
+        - errcheck
+
+    # Allow unused parameters in interface implementations
+    - text: "unused-parameter"
+      linters:
+        - revive
+
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  formats:
+    - format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true

@@ -190,7 +190,7 @@ func TestNewConnectionGater(t *testing.T) {
 	gater := NewConnectionGater(checker)
 
 	if gater == nil {
-		t.Error("NewConnectionGater should return non-nil gater")
+		t.Fatal("NewConnectionGater should return non-nil gater")
 	}
 	if gater.checker != checker {
 		t.Error("NewConnectionGater should set checker")

@@ -94,12 +94,12 @@ func (m *mockStream) CloseRead() error {
 }
 
 // The following methods satisfy the network.Stream interface but aren't used in tests
-func (m *mockStream) ID() string                     { return "test-stream" }
-func (m *mockStream) Protocol() protocol.ID          { return "/test/1.0.0" }
+func (m *mockStream) ID() string                       { return "test-stream" }
+func (m *mockStream) Protocol() protocol.ID            { return "/test/1.0.0" }
 func (m *mockStream) SetProtocol(id protocol.ID) error { return nil }
-func (m *mockStream) Stat() network.Stats            { return network.Stats{} }
-func (m *mockStream) Conn() network.Conn             { return nil }
-func (m *mockStream) Scope() network.StreamScope     { return nil }
+func (m *mockStream) Stat() network.Stats              { return network.Stats{} }
+func (m *mockStream) Conn() network.Conn               { return nil }
+func (m *mockStream) Scope() network.StreamScope       { return nil }
 
 // Test message types
 type TestMessage struct {

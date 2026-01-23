@@ -113,20 +113,3 @@ func (s *storage) save(book *addressBookData) error {
 
 	return nil
 }
-
-// exists checks if the address book file exists.
-func (s *storage) exists() bool {
-	_, err := os.Stat(s.path)
-	return err == nil
-}
-
-// delete removes the address book file.
-func (s *storage) delete() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := os.Remove(s.path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to delete address book: %w", err)
-	}
-	return nil
-}

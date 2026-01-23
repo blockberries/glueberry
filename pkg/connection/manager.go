@@ -165,8 +165,8 @@ func (m *Manager) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
 
 	m.emitEvent(peerID, StateConnected, nil)
 
-	// Update last seen
-	m.addressBook.UpdateLastSeen(peerID)
+	// Update last seen (ignore error - not critical)
+	_ = m.addressBook.UpdateLastSeen(peerID)
 
 	// Open handshake stream
 	streamCtx, streamCancel := context.WithTimeout(m.ctx, 10*time.Second)
@@ -182,7 +182,7 @@ func (m *Manager) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
 	handshakeStream := streams.NewHandshakeStream(rawStream, m.config.HandshakeTimeout)
 
 	// Set up handshake timeout enforcement
-	m.setupHandshakeTimeout(conn, handshakeStream)
+	m.setupHandshakeTimeout(conn)
 
 	// Set the handshake stream
 	m.mu.Lock()
@@ -220,14 +220,12 @@ func (m *Manager) Disconnect(peerID peer.ID) error {
 	// Cleanup connection resources
 	conn.Cleanup()
 
-	// Close libp2p connection
-	if err := m.host.Disconnect(peerID); err != nil {
-		// Log but don't fail
-	}
+	// Close libp2p connection (ignore error - cleanup path)
+	_ = m.host.Disconnect(peerID)
 
 	// Update state
 	m.mu.Lock()
-	conn.TransitionTo(StateDisconnected)
+	_ = conn.TransitionTo(StateDisconnected) // Ignore error - we're in cleanup path
 	m.mu.Unlock()
 
 	m.emitEvent(peerID, StateDisconnected, nil)
@@ -264,14 +262,14 @@ func (m *Manager) CancelReconnection(peerID peer.ID) error {
 
 	// Update connection state
 	if conn, ok := m.connections[peerID]; ok {
-		conn.TransitionTo(StateDisconnected)
+		_ = conn.TransitionTo(StateDisconnected) // Ignore error - reconnection cancelled
 	}
 
 	return nil
 }
 
 // setupHandshakeTimeout sets up a timer to enforce handshake timeout.
-func (m *Manager) setupHandshakeTimeout(conn *PeerConnection, hs *streams.HandshakeStream) {
+func (m *Manager) setupHandshakeTimeout(conn *PeerConnection) {
 	timeoutCtx, cancel := context.WithCancel(m.ctx)
 	conn.HandshakeCancel = cancel
 
@@ -307,14 +305,14 @@ func (m *Manager) handleHandshakeTimeout(peerID peer.ID) {
 	m.mu.Unlock()
 
 	// Close handshake stream
-	conn.ClearHandshakeStream()
+	_ = conn.ClearHandshakeStream() // Ignore error - we're cleaning up
 
 	// Disconnect the peer
-	m.host.Disconnect(peerID)
+	_ = m.host.Disconnect(peerID) // Ignore error - best effort disconnect
 
 	// Transition to cooldown
 	m.mu.Lock()
-	conn.StartCooldown(m.config.FailedHandshakeCooldown)
+	_ = conn.StartCooldown(m.config.FailedHandshakeCooldown) // Ignore error - cleanup path
 	m.mu.Unlock()
 
 	m.emitEvent(peerID, StateCooldown, fmt.Errorf("handshake timeout"))
@@ -329,7 +327,7 @@ func (m *Manager) handleConnectFailure(peerID peer.ID, err error) {
 	conn, exists := m.connections[peerID]
 	if exists {
 		conn.SetError(err)
-		conn.TransitionTo(StateDisconnected)
+		_ = conn.TransitionTo(StateDisconnected) // Ignore error - in error path
 	}
 	m.mu.Unlock()
 
@@ -378,7 +376,7 @@ func (m *Manager) startReconnection(peerID peer.ID) {
 
 	// Update connection state
 	conn.ReconnectState = reconnState
-	conn.TransitionTo(StateReconnecting)
+	_ = conn.TransitionTo(StateReconnecting) // Ignore error - starting reconnection
 	m.mu.Unlock()
 
 	m.emitEvent(peerID, StateReconnecting, nil)
@@ -456,14 +454,14 @@ func (m *Manager) attemptReconnect(peerID peer.ID) error {
 	m.mu.Lock()
 	conn := m.connections[peerID]
 	if conn != nil {
-		conn.TransitionTo(StateConnected)
+		_ = conn.TransitionTo(StateConnected) // Ignore error - reconnection success
 	}
 	m.mu.Unlock()
 
 	m.emitEvent(peerID, StateConnected, nil)
 
-	// Update last seen
-	m.addressBook.UpdateLastSeen(peerID)
+	// Update last seen (ignore error - not critical)
+	_ = m.addressBook.UpdateLastSeen(peerID)
 
 	// Reconnection successful - handshake stream will be opened when app calls Connect() again
 	return nil
@@ -480,7 +478,7 @@ func (m *Manager) scheduleReconnectAfterCooldown(peerID peer.ID, cooldown time.D
 			m.mu.Lock()
 			if conn, exists := m.connections[peerID]; exists {
 				if conn.GetState() == StateCooldown {
-					conn.TransitionTo(StateDisconnected)
+					_ = conn.TransitionTo(StateDisconnected) // Ignore error - cooldown expired
 					m.mu.Unlock()
 					m.emitEvent(peerID, StateDisconnected, nil)
 					m.startReconnection(peerID)
@@ -497,7 +495,7 @@ func (m *Manager) handleReconnectionExhausted(peerID peer.ID) {
 	m.mu.Lock()
 	delete(m.reconnecting, peerID)
 	if conn, exists := m.connections[peerID]; exists {
-		conn.TransitionTo(StateDisconnected)
+		_ = conn.TransitionTo(StateDisconnected) // Ignore error - reconnection exhausted
 		conn.SetError(fmt.Errorf("reconnection attempts exhausted"))
 	}
 	m.mu.Unlock()
@@ -510,7 +508,7 @@ func (m *Manager) handleReconnectionCancelled(peerID peer.ID) {
 	m.mu.Lock()
 	delete(m.reconnecting, peerID)
 	if conn, exists := m.connections[peerID]; exists {
-		conn.TransitionTo(StateDisconnected)
+		_ = conn.TransitionTo(StateDisconnected) // Ignore error - reconnection cancelled
 	}
 	m.mu.Unlock()
 
@@ -531,7 +529,7 @@ func (m *Manager) OnDisconnect(peerID peer.ID, err error) {
 	conn.Cleanup()
 
 	// Transition to disconnected
-	conn.TransitionTo(StateDisconnected)
+	_ = conn.TransitionTo(StateDisconnected) // Ignore error - handling disconnect
 	conn.SetError(err)
 	m.mu.Unlock()
 
@@ -603,7 +601,7 @@ func (m *Manager) MarkEstablished(peerID peer.ID) error {
 	}
 
 	// Clear handshake resources
-	conn.ClearHandshakeStream()
+	_ = conn.ClearHandshakeStream() // Ignore error - cleanup
 
 	// Transition to established
 	m.mu.Lock()
@@ -630,5 +628,3 @@ func (m *Manager) GetOrCreateConnection(peerID peer.ID) *PeerConnection {
 	}
 	return conn
 }
-
-

@@ -279,17 +279,3 @@ func TestEncryptedStream_ReadLoopEOF(t *testing.T) {
 		t.Logf("Stream not yet closed after EOF, this is acceptable")
 	}
 }
-
-// mockReadWriter wraps separate reader and writer
-type mockReadWriter struct {
-	reader io.Reader
-	writer io.Writer
-}
-
-func (mrw *mockReadWriter) Read(p []byte) (n int, err error) {
-	return mrw.reader.Read(p)
-}
-
-func (mrw *mockReadWriter) Write(p []byte) (n int, err error) {
-	return mrw.writer.Write(p)
-}

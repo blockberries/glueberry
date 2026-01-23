@@ -92,6 +92,6 @@ func (sh *StreamHandler) HandleStream(streamName string) network.StreamHandler {
 		// in registerIncomingStreamHandlers with access to shared keys
 
 		// Placeholder: close the stream
-		stream.Reset()
+		_ = stream.Reset() // Ignore error - just closing
 	}
 }

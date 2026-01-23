@@ -174,10 +174,10 @@ func TestPeerEntry_Clone_EmptyFields(t *testing.T) {
 	if clone.PeerID != original.PeerID {
 		t.Error("PeerID should be cloned")
 	}
-	if clone.Multiaddrs != nil && len(clone.Multiaddrs) != 0 {
-		t.Error("empty Multiaddrs should result in nil or empty slice")
+	if len(clone.Multiaddrs) != 0 {
+		t.Error("empty Multiaddrs should result in empty slice")
 	}
-	if clone.Metadata != nil && len(clone.Metadata) != 0 {
-		t.Error("empty Metadata should result in nil or empty map")
+	if len(clone.Metadata) != 0 {
+		t.Error("empty Metadata should result in empty map")
 	}
 }

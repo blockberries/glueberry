@@ -11,14 +11,14 @@ func TestBackoffCalculator_NextDelay(t *testing.T) {
 	bc := NewBackoffCalculator(1*time.Second, 1*time.Minute)
 
 	tests := []struct {
-		attempt int
+		attempt  int
 		minDelay time.Duration
 		maxDelay time.Duration
 	}{
-		{0, 0, 2 * time.Second},     // 1s * 2^0 = 1s, with jitter
-		{1, time.Second, 3 * time.Second},     // 1s * 2^1 = 2s, with jitter
-		{2, 3 * time.Second, 5 * time.Second},     // 1s * 2^2 = 4s, with jitter
-		{3, 7 * time.Second, 9 * time.Second},     // 1s * 2^3 = 8s, with jitter
+		{0, 0, 2 * time.Second},                  // 1s * 2^0 = 1s, with jitter
+		{1, time.Second, 3 * time.Second},        // 1s * 2^1 = 2s, with jitter
+		{2, 3 * time.Second, 5 * time.Second},    // 1s * 2^2 = 4s, with jitter
+		{3, 7 * time.Second, 9 * time.Second},    // 1s * 2^3 = 8s, with jitter
 		{10, 55 * time.Second, 66 * time.Second}, // Capped at 1m with jitter
 	}
 
@@ -102,8 +102,8 @@ func TestShouldRetry_Limited(t *testing.T) {
 		{0, true},
 		{1, true},
 		{4, true},
-		{5, false},  // At limit
-		{6, false},  // Exceeded
+		{5, false},   // At limit
+		{6, false},   // Exceeded
 		{100, false}, // Far exceeded
 	}
 

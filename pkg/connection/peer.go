@@ -109,9 +109,7 @@ func (pc *PeerConnection) ClearHandshakeStream() error {
 	defer pc.mu.Unlock()
 
 	if pc.HandshakeStream != nil {
-		if err := pc.HandshakeStream.Close(); err != nil {
-			// Log but don't fail on close error
-		}
+		_ = pc.HandshakeStream.Close() // Ignore error - cleanup path
 		pc.HandshakeStream = nil
 	}
 

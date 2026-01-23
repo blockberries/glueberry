@@ -79,9 +79,9 @@ func TestConnectionState_IsActive(t *testing.T) {
 
 func TestConnectionState_CanTransitionTo(t *testing.T) {
 	tests := []struct {
-		name   string
-		from   ConnectionState
-		to     ConnectionState
+		name          string
+		from          ConnectionState
+		to            ConnectionState
 		canTransition bool
 	}{
 		// From Disconnected

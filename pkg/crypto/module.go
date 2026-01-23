@@ -135,9 +135,8 @@ func (m *Module) ClearPeerKeys() {
 // Encrypt encrypts plaintext using the shared key derived for the given peer.
 // The peer must have a cached shared key (via DeriveSharedKey).
 func (m *Module) Encrypt(remoteX25519, plaintext []byte) ([]byte, error) {
-	cacheKey := string(remoteX25519)
 	m.peerKeysMu.RLock()
-	key, ok := m.peerKeys[cacheKey]
+	key, ok := m.peerKeys[string(remoteX25519)]
 	m.peerKeysMu.RUnlock()
 
 	if !ok {
@@ -150,9 +149,8 @@ func (m *Module) Encrypt(remoteX25519, plaintext []byte) ([]byte, error) {
 // Decrypt decrypts ciphertext using the shared key derived for the given peer.
 // The peer must have a cached shared key (via DeriveSharedKey).
 func (m *Module) Decrypt(remoteX25519, ciphertext []byte) ([]byte, error) {
-	cacheKey := string(remoteX25519)
 	m.peerKeysMu.RLock()
-	key, ok := m.peerKeys[cacheKey]
+	key, ok := m.peerKeys[string(remoteX25519)]
 	m.peerKeysMu.RUnlock()
 
 	if !ok {
