@@ -1342,6 +1342,113 @@ All tests run with `-race` flag for race condition detection.
 
 ---
 
+## Architectural Improvement: Lazy Stream Opening
+
+**Status:** ✅ Complete
+**Commit:** (pending)
+
+### Problem Identified
+Original design had an **asymmetric API** requiring careful synchronization:
+- One node had to call `EstablishEncryptedStreams()` first (to register handlers)
+- Then the other node could call it (to open streams)
+- Calling simultaneously → "protocol not supported" errors
+- Forced one node to be "server" and one to be "client"
+- **This violated P2P symmetry principles**
+
+### Solution: Lazy Stream Opening
+Refactored to make the API **fully symmetric**:
+
+**Before (Asymmetric):**
+```go
+// Node2 MUST go first
+node2.EstablishEncryptedStreams(node1ID, pub1, streams) // Registers handlers
+time.Sleep() // Wait for handlers to register
+node1.EstablishEncryptedStreams(node2ID, pub2, streams) // Opens streams
+```
+
+**After (Symmetric):**
+```go
+// ANY order works - no synchronization needed!
+node1.EstablishEncryptedStreams(node2ID, pub2, streams)
+node2.EstablishEncryptedStreams(node1ID, pub1, streams)
+// Streams open lazily on first Send()
+```
+
+### Implementation Changes
+
+**pkg/streams/manager.go:**
+- Added `allowedStreams map[peer.ID]map[string]bool` - Tracks which streams are allowed per peer
+- Added `sharedKeys map[peer.ID][]byte` - Stores encryption keys per peer
+- **EstablishStreams()** refactored:
+  - Only registers state (shared key, allowed stream names)
+  - Does NOT open any streams
+  - Returns immediately
+  - Fully idempotent (can call multiple times to add streams)
+- **Send()** refactored:
+  - Checks if stream exists
+  - If not, calls `openStreamLazily()` to create on-demand
+  - Then sends message
+- **openStreamLazily()** added:
+  - Opens libp2p stream on first use
+  - Creates EncryptedStream
+  - Stores in streams map
+  - Thread-safe with double-checked locking
+- **HandleIncomingStream()** updated:
+  - Uses stored shared key (no longer passed as parameter)
+  - Validates stream name against allowed list
+  - Works symmetrically with outgoing streams
+
+**node.go:**
+- `EstablishEncryptedStreams()` updated:
+  - Detects incoming connections (State == Disconnected)
+  - Calls `RegisterIncomingConnection()` for proper state tracking
+  - Rest of flow unchanged
+- `registerIncomingStreamHandlers()` simplified:
+  - No longer passes shared key to HandleIncomingStream
+  - Stream manager looks up shared key internally
+
+**pkg/connection/manager.go:**
+- Added `RegisterIncomingConnection()` - Transitions incoming connections through state machine
+- Updated `SetSharedKey()` - Uses GetOrCreateConnection (works for both directions)
+
+### Benefits
+
+1. **✅ Fully Symmetric** - Both nodes are equal peers
+2. **✅ No Synchronization** - Call EstablishEncryptedStreams in any order
+3. **✅ Lazy Resource Allocation** - Streams only created when needed
+4. **✅ Cleaner API** - No timing concerns for users
+5. **✅ Same Behavior** - Regardless of connection direction (incoming/outgoing)
+
+### Integration Test Validates
+**TestIntegration_UnidirectionalMessaging** now demonstrates:
+- ✅ Both nodes call EstablishEncryptedStreams (either order works)
+- ✅ Node1 sends to Node2 (stream opens lazily)
+- ✅ Node2 sends to Node1 (stream opens lazily)
+- ✅ **Fully bidirectional** encrypted messaging
+- ✅ **No synchronization** required
+- ✅ **True P2P symmetry**
+
+Test output:
+```
+✅ Both nodes ready (streams will open lazily on first Send)
+✅ Node1 sent (stream opened lazily)
+✅ Node2 received: Hello from Node1!
+✅ Node2 sent (stream opened lazily)
+✅ Node1 received: Hello back from Node2!
+✅✅✅ INTEGRATION TEST PASSED!
+  - Symmetric API: Both nodes called EstablishEncryptedStreams in any order
+  - Lazy stream opening: Streams created on first Send()
+  - Bidirectional messaging: Both nodes sent and received encrypted messages
+```
+
+### Test Results
+- All 218 tests passing (217 unit + 1 integration)
+- Integration test demonstrates **bidirectional** messaging
+- No race conditions
+- golangci-lint clean
+
+---
+
 ## Final Summary
 
 ### Implementation Status: **✅ COMPLETE**

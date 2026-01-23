@@ -74,29 +74,41 @@ func TestManager_EstablishStreams(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	streamNames := []string{"blocks", "transactions", "consensus"}
 
-	// Establish streams
+	// Establish streams (now only registers, doesn't open)
 	err := mgr.EstablishStreams(peerID, mod2.Ed25519PublicKey(), streamNames)
 	if err != nil {
 		t.Fatalf("EstablishStreams failed: %v", err)
 	}
 
-	// Verify streams were created
+	// With lazy opening, streams are NOT created until Send() or incoming
+	// Verify GetStream returns nil for unopened streams
 	for _, name := range streamNames {
 		stream := mgr.GetStream(peerID, name)
-		if stream == nil {
-			t.Errorf("stream %q not found", name)
+		if stream != nil {
+			t.Errorf("stream %q should not exist yet (lazy opening)", name)
 		}
 	}
 
-	// Verify HasStreams
-	if !mgr.HasStreams(peerID) {
-		t.Error("HasStreams should be true")
+	// HasStreams should be false (no streams opened yet)
+	if mgr.HasStreams(peerID) {
+		t.Error("HasStreams should be false before any streams opened")
 	}
 
-	// Verify ListStreams
-	names := mgr.ListStreams(peerID)
-	if len(names) != len(streamNames) {
-		t.Errorf("ListStreams returned %d streams, want %d", len(names), len(streamNames))
+	// But we can Send, which will open streams lazily
+	testData := []byte("test message")
+	if err := mgr.Send(peerID, "blocks", testData); err != nil {
+		t.Errorf("Send should succeed (lazy stream opening): %v", err)
+	}
+
+	// Now GetStream should return the lazily-opened stream
+	stream := mgr.GetStream(peerID, "blocks")
+	if stream == nil {
+		t.Error("stream 'blocks' should exist after Send()")
+	}
+
+	// HasStreams should now be true
+	if !mgr.HasStreams(peerID) {
+		t.Error("HasStreams should be true after Send()")
 	}
 }
 
@@ -121,7 +133,7 @@ func TestManager_EstablishStreams_NoNames(t *testing.T) {
 	}
 }
 
-func TestManager_EstablishStreams_AlreadyExists(t *testing.T) {
+func TestManager_EstablishStreams_Multiple(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -138,18 +150,26 @@ func TestManager_EstablishStreams_AlreadyExists(t *testing.T) {
 	defer mgr.Shutdown()
 
 	peerID := mustParsePeerID(t, testPeerIDStr)
-	streamNames := []string{"test"}
 
-	// First establish
-	err := mgr.EstablishStreams(peerID, mod2.Ed25519PublicKey(), streamNames)
+	// First establish with some streams
+	err := mgr.EstablishStreams(peerID, mod2.Ed25519PublicKey(), []string{"stream1"})
 	if err != nil {
 		t.Fatalf("first EstablishStreams failed: %v", err)
 	}
 
-	// Second establish should fail
-	err = mgr.EstablishStreams(peerID, mod2.Ed25519PublicKey(), streamNames)
-	if err == nil {
-		t.Error("EstablishStreams should fail when streams already exist")
+	// Second establish with additional streams should succeed (adds to allowed list)
+	err = mgr.EstablishStreams(peerID, mod2.Ed25519PublicKey(), []string{"stream2", "stream3"})
+	if err != nil {
+		t.Fatalf("second EstablishStreams failed: %v", err)
+	}
+
+	// Both stream names should be allowed
+	// Verify by sending (which will open lazily)
+	mgr.Send(peerID, "stream1", []byte("test1"))
+	mgr.Send(peerID, "stream2", []byte("test2"))
+
+	if !mgr.HasStreams(peerID) {
+		t.Error("Should have streams after Send()")
 	}
 }
 
@@ -307,14 +327,14 @@ func TestManager_HandleIncomingStream(t *testing.T) {
 
 	peerID := mustParsePeerID(t, testPeerIDStr)
 
-	// Derive shared key
-	key, _ := mod1.DeriveSharedKey(mod2.Ed25519PublicKey())
+	// First establish streams (registers shared key and allowed streams)
+	mgr.EstablishStreams(peerID, mod2.Ed25519PublicKey(), []string{"incoming-test"})
 
 	// Simulate incoming stream
 	var buf bytes.Buffer
 	stream := newMockStream(&buf, &buf)
 
-	err := mgr.HandleIncomingStream(peerID, "incoming-test", stream, key)
+	err := mgr.HandleIncomingStream(peerID, "incoming-test", stream)
 	if err != nil {
 		t.Fatalf("HandleIncomingStream failed: %v", err)
 	}
@@ -347,20 +367,22 @@ func TestManager_HandleIncomingStream_Duplicate(t *testing.T) {
 	defer mgr.Shutdown()
 
 	peerID := mustParsePeerID(t, testPeerIDStr)
-	key, _ := mod1.DeriveSharedKey(mod2.Ed25519PublicKey())
+
+	// First establish streams (registers shared key and allowed streams)
+	mgr.EstablishStreams(peerID, mod2.Ed25519PublicKey(), []string{"test"})
 
 	var buf1, buf2 bytes.Buffer
 	stream1 := newMockStream(&buf1, &buf1)
 	stream2 := newMockStream(&buf2, &buf2)
 
 	// First incoming stream
-	err := mgr.HandleIncomingStream(peerID, "test", stream1, key)
+	err := mgr.HandleIncomingStream(peerID, "test", stream1)
 	if err != nil {
 		t.Fatalf("first HandleIncomingStream failed: %v", err)
 	}
 
 	// Duplicate should fail
-	err = mgr.HandleIncomingStream(peerID, "test", stream2, key)
+	err = mgr.HandleIncomingStream(peerID, "test", stream2)
 	if err == nil {
 		t.Error("HandleIncomingStream should fail for duplicate stream name")
 	}

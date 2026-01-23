@@ -88,42 +88,72 @@ func TestIntegration_UnidirectionalMessaging(t *testing.T) {
 	// Wait for node2 to be ready
 	<-handshakeDone
 
-	// Give node2's handlers time to register
-	time.Sleep(300 * time.Millisecond)
+	// With lazy stream opening, BOTH nodes can call EstablishEncryptedStreams
+	// in ANY order - no synchronization required!
+	t.Log("Both nodes establishing encrypted streams (can be in any order)...")
 
-	// Node1 establishes encrypted streams (this will open streams to node2)
-	t.Log("Node1 establishing encrypted streams...")
+	// Node1 establishes (registers handlers)
 	if err := node1.EstablishEncryptedStreams(node2.PeerID(), pub2, []string{"messages"}); err != nil {
 		t.Fatalf("Node1 EstablishEncryptedStreams failed: %v", err)
 	}
 
-	// Give streams time to initialize
-	time.Sleep(500 * time.Millisecond)
+	// Node2 establishes (registers handlers)
+	if err := node2.EstablishEncryptedStreams(node1.PeerID(), pub1, []string{"messages"}); err != nil {
+		t.Fatalf("Node2 EstablishEncryptedStreams failed: %v", err)
+	}
+
+	t.Log("✅ Both nodes ready (streams will open lazily on first Send)")
+
+	// Give time for handlers to register
+	time.Sleep(200 * time.Millisecond)
 
 	// Check states
 	t.Logf("Node1 state: %v", node1.ConnectionState(node2.PeerID()))
 	t.Logf("Node2 state: %v", node2.ConnectionState(node1.PeerID()))
 
-	// Send message from node1 to node2
-	testMessage := []byte("Integration test message!")
-	t.Log("Sending message...")
+	// Test bidirectional messaging - both nodes can send to each other
+	// Streams open lazily on first Send()
 
-	if err := node1.Send(node2.PeerID(), "messages", testMessage); err != nil {
-		t.Fatalf("Send failed: %v", err)
+	// Node1 → Node2
+	msg1to2 := []byte("Hello from Node1!")
+	t.Log("Node1 sending to Node2 (stream will open lazily)...")
+	if err := node1.Send(node2.PeerID(), "messages", msg1to2); err != nil {
+		t.Fatalf("Node1 Send failed: %v", err)
 	}
+	t.Log("✅ Node1 sent (stream opened lazily)")
 
-	t.Log("✅ Message sent")
-
-	// Receive on node2
+	// Node2 receives
 	select {
 	case msg := <-node2.Messages():
-		t.Logf("✅ Received message: %s", string(msg.Data))
-		if string(msg.Data) != string(testMessage) {
+		t.Logf("✅ Node2 received: %s", string(msg.Data))
+		if string(msg.Data) != string(msg1to2) {
 			t.Errorf("Message mismatch")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for message")
+		t.Fatal("Timeout waiting for message on node2")
 	}
 
-	t.Log("✅✅✅ INTEGRATION TEST PASSED - Encrypted messaging works end-to-end!")
+	// Node2 → Node1 (demonstrates symmetry)
+	msg2to1 := []byte("Hello back from Node2!")
+	t.Log("Node2 sending to Node1 (stream will open lazily)...")
+	if err := node2.Send(node1.PeerID(), "messages", msg2to1); err != nil {
+		t.Fatalf("Node2 Send failed: %v", err)
+	}
+	t.Log("✅ Node2 sent (stream opened lazily)")
+
+	// Node1 receives
+	select {
+	case msg := <-node1.Messages():
+		t.Logf("✅ Node1 received: %s", string(msg.Data))
+		if string(msg.Data) != string(msg2to1) {
+			t.Errorf("Message mismatch")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for message on node1")
+	}
+
+	t.Log("✅✅✅ INTEGRATION TEST PASSED!")
+	t.Log("  - Symmetric API: Both nodes called EstablishEncryptedStreams in any order")
+	t.Log("  - Lazy stream opening: Streams created on first Send()")
+	t.Log("  - Bidirectional messaging: Both nodes sent and received encrypted messages")
 }

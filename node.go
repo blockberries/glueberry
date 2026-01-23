@@ -336,21 +336,10 @@ func (n *Node) registerIncomingStreamHandlers(streamNames []string) {
 		handler := func(stream network.Stream) {
 			remotePeerID := stream.Conn().RemotePeer()
 
-			// Verify it's the expected peer
-			// (In practice, any peer with the shared key could connect,
-			// but we'll accept streams from any peer that has completed handshake)
-
-			// Get shared key for this peer
-			key := n.connections.GetSharedKey(remotePeerID)
-			if key == nil {
-				// No shared key - reject stream
-				_ = stream.Reset() // Ignore error - rejecting stream
-				return
-			}
-
 			// Accept the incoming stream
-			if err := n.streamManager.HandleIncomingStream(remotePeerID, streamName, stream, key); err != nil {
-				// Failed to create encrypted stream
+			// The stream manager will check for shared key and allowed streams
+			if err := n.streamManager.HandleIncomingStream(remotePeerID, streamName, stream); err != nil {
+				// Failed to create encrypted stream (no shared key or not allowed)
 				_ = stream.Reset() // Ignore error - error path
 				return
 			}

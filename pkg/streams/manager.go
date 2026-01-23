@@ -22,7 +22,14 @@ type Manager struct {
 	host    StreamOpener
 	crypto  *crypto.Module
 	streams map[peer.ID]map[string]*EncryptedStream
-	mu      sync.RWMutex
+
+	// allowedStreams tracks which stream names are allowed for each peer
+	allowedStreams map[peer.ID]map[string]bool
+
+	// sharedKeys stores the encryption key for each peer
+	sharedKeys map[peer.ID][]byte
+
+	mu sync.RWMutex
 
 	incoming chan IncomingMessage
 	ctx      context.Context
@@ -39,17 +46,20 @@ func NewManager(
 	managerCtx, cancel := context.WithCancel(ctx)
 
 	return &Manager{
-		host:     host,
-		crypto:   cryptoModule,
-		streams:  make(map[peer.ID]map[string]*EncryptedStream),
-		incoming: incomingChan,
-		ctx:      managerCtx,
-		cancel:   cancel,
+		host:           host,
+		crypto:         cryptoModule,
+		streams:        make(map[peer.ID]map[string]*EncryptedStream),
+		allowedStreams: make(map[peer.ID]map[string]bool),
+		sharedKeys:     make(map[peer.ID][]byte),
+		incoming:       incomingChan,
+		ctx:            managerCtx,
+		cancel:         cancel,
 	}
 }
 
-// EstablishStreams establishes encrypted streams to a peer.
-// It derives a shared key from the peer's public key and opens the specified streams.
+// EstablishStreams registers the shared key and allowed stream names for a peer.
+// Streams are opened lazily on first Send() or when received from the remote peer.
+// This makes the API symmetric - both peers can call this in any order.
 func (m *Manager) EstablishStreams(
 	peerID peer.ID,
 	peerPubKey ed25519.PublicKey,
@@ -68,70 +78,101 @@ func (m *Manager) EstablishStreams(
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if streams already exist for this peer
-	if existing, ok := m.streams[peerID]; ok && len(existing) > 0 {
-		return fmt.Errorf("encrypted streams already established for peer %s", peerID)
+	// Store shared key
+	m.sharedKeys[peerID] = sharedKey
+
+	// Initialize peer streams map if needed
+	if _, ok := m.streams[peerID]; !ok {
+		m.streams[peerID] = make(map[string]*EncryptedStream)
 	}
 
-	// Create peer streams map
-	peerStreams := make(map[string]*EncryptedStream)
-
-	// Open each stream
+	// Store allowed stream names
+	if _, ok := m.allowedStreams[peerID]; !ok {
+		m.allowedStreams[peerID] = make(map[string]bool)
+	}
 	for _, name := range streamNames {
-		// Open libp2p stream
-		rawStream, err := m.host.NewStream(m.ctx, peerID, name)
-		if err != nil {
-			// Close any streams we've already opened
-			for _, s := range peerStreams {
-				s.Close()
-			}
-			return fmt.Errorf("failed to open stream %q: %w", name, err)
-		}
-
-		// Create encrypted stream
-		encStream, err := NewEncryptedStream(
-			m.ctx,
-			name,
-			peerID,
-			rawStream,
-			sharedKey,
-			m.incoming,
-		)
-		if err != nil {
-			rawStream.Close()
-			// Close any streams we've already opened
-			for _, s := range peerStreams {
-				s.Close()
-			}
-			return fmt.Errorf("failed to create encrypted stream %q: %w", name, err)
-		}
-
-		peerStreams[name] = encStream
+		m.allowedStreams[peerID][name] = true
 	}
-
-	// Store streams
-	m.streams[peerID] = peerStreams
 
 	return nil
 }
 
 // Send sends data over an encrypted stream to a peer.
+// If the stream doesn't exist, it is opened lazily.
 func (m *Manager) Send(peerID peer.ID, streamName string, data []byte) error {
+	// First try to get existing stream
 	m.mu.RLock()
-	peerStreams, ok := m.streams[peerID]
-	if !ok {
-		m.mu.RUnlock()
-		return fmt.Errorf("no streams for peer %s", peerID)
+	peerStreams, hasPeerStreams := m.streams[peerID]
+	var stream *EncryptedStream
+	if hasPeerStreams {
+		stream = peerStreams[streamName]
 	}
-
-	stream, ok := peerStreams[streamName]
 	m.mu.RUnlock()
 
-	if !ok {
-		return fmt.Errorf("stream %q not found for peer %s", streamName, peerID)
+	// If stream exists and is not closed, use it
+	if stream != nil && !stream.IsClosed() {
+		return stream.Send(data)
+	}
+
+	// Stream doesn't exist or is closed - open it lazily
+	stream, err := m.openStreamLazily(peerID, streamName)
+	if err != nil {
+		return err
 	}
 
 	return stream.Send(data)
+}
+
+// openStreamLazily opens a stream on-demand.
+func (m *Manager) openStreamLazily(peerID peer.ID, streamName string) (*EncryptedStream, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Double-check stream doesn't exist (may have been created while waiting for lock)
+	if peerStreams, ok := m.streams[peerID]; ok {
+		if stream, exists := peerStreams[streamName]; exists && !stream.IsClosed() {
+			return stream, nil
+		}
+	}
+
+	// Check if this stream name is allowed
+	if allowedStreams, ok := m.allowedStreams[peerID]; !ok || !allowedStreams[streamName] {
+		return nil, fmt.Errorf("stream %q not allowed for peer %s (call EstablishStreams first)", streamName, peerID)
+	}
+
+	// Get shared key
+	sharedKey, ok := m.sharedKeys[peerID]
+	if !ok {
+		return nil, fmt.Errorf("no shared key for peer %s (call EstablishStreams first)", peerID)
+	}
+
+	// Open libp2p stream
+	rawStream, err := m.host.NewStream(m.ctx, peerID, streamName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stream %q: %w", streamName, err)
+	}
+
+	// Create encrypted stream
+	encStream, err := NewEncryptedStream(
+		m.ctx,
+		streamName,
+		peerID,
+		rawStream,
+		sharedKey,
+		m.incoming,
+	)
+	if err != nil {
+		rawStream.Close()
+		return nil, fmt.Errorf("failed to create encrypted stream %q: %w", streamName, err)
+	}
+
+	// Store the stream
+	if _, ok := m.streams[peerID]; !ok {
+		m.streams[peerID] = make(map[string]*EncryptedStream)
+	}
+	m.streams[peerID][streamName] = encStream
+
+	return encStream, nil
 }
 
 // CloseStreams closes all streams for a peer.
@@ -152,13 +193,10 @@ func (m *Manager) CloseStreams(peerID peer.ID) error {
 		}
 	}
 
-	// Remove from map
+	// Remove from maps
 	delete(m.streams, peerID)
-
-	// Clean up crypto module's cached key
-	// We need the peer's X25519 public key for this
-	// For now, we'll let it be cleaned up naturally
-	// TODO: Store X25519 public key in PeerConnection and pass it here
+	delete(m.allowedStreams, peerID)
+	delete(m.sharedKeys, peerID)
 
 	return lastErr
 }
@@ -205,14 +243,25 @@ func (m *Manager) ListStreams(peerID peer.ID) []string {
 
 // HandleIncomingStream handles an incoming stream request from a remote peer.
 // This is called by the protocol handler when a remote peer opens a stream.
+// The shared key must have been previously established via EstablishStreams.
 func (m *Manager) HandleIncomingStream(
 	peerID peer.ID,
 	streamName string,
 	stream network.Stream,
-	sharedKey []byte,
 ) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Check if this stream name is allowed
+	if allowedStreams, ok := m.allowedStreams[peerID]; !ok || !allowedStreams[streamName] {
+		return fmt.Errorf("stream %q not allowed for peer %s (call EstablishStreams first)", streamName, peerID)
+	}
+
+	// Get shared key
+	sharedKey, ok := m.sharedKeys[peerID]
+	if !ok {
+		return fmt.Errorf("no shared key for peer %s (call EstablishStreams first)", peerID)
+	}
 
 	// Get or create peer streams map
 	peerStreams, ok := m.streams[peerID]
@@ -222,8 +271,11 @@ func (m *Manager) HandleIncomingStream(
 	}
 
 	// Check if stream already exists
-	if _, exists := peerStreams[streamName]; exists {
-		return fmt.Errorf("stream %q already exists for peer %s", streamName, peerID)
+	if existing, exists := peerStreams[streamName]; exists {
+		if !existing.IsClosed() {
+			return fmt.Errorf("stream %q already exists for peer %s", streamName, peerID)
+		}
+		// Stream exists but is closed - replace it
 	}
 
 	// Create encrypted stream
@@ -258,4 +310,6 @@ func (m *Manager) Shutdown() {
 	}
 
 	m.streams = make(map[peer.ID]map[string]*EncryptedStream)
+	m.allowedStreams = make(map[peer.ID]map[string]bool)
+	m.sharedKeys = make(map[peer.ID][]byte)
 }
