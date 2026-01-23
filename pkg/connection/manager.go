@@ -576,15 +576,9 @@ func (m *Manager) GetSharedKey(peerID peer.ID) []byte {
 
 // SetSharedKey stores the shared encryption key for a peer.
 // This should be called after successful handshake.
+// Creates a connection entry if one doesn't exist (for incoming connections).
 func (m *Manager) SetSharedKey(peerID peer.ID, key []byte) error {
-	m.mu.RLock()
-	conn, exists := m.connections[peerID]
-	m.mu.RUnlock()
-
-	if !exists {
-		return fmt.Errorf("peer %s not connected", peerID)
-	}
-
+	conn := m.GetOrCreateConnection(peerID)
 	conn.SetSharedKey(key)
 	return nil
 }
@@ -627,4 +621,23 @@ func (m *Manager) GetOrCreateConnection(peerID peer.ID) *PeerConnection {
 		m.connections[peerID] = conn
 	}
 	return conn
+}
+
+// RegisterIncomingConnection registers an incoming connection and transitions through states.
+// This should be called when handling an incoming handshake before EstablishEncryptedStreams.
+func (m *Manager) RegisterIncomingConnection(peerID peer.ID) error {
+	conn := m.GetOrCreateConnection(peerID)
+
+	// Transition through states to reach Handshaking
+	// This mimics the outgoing connection flow
+	state := conn.GetState()
+
+	if state == StateDisconnected {
+		_ = conn.TransitionTo(StateConnecting)
+		_ = conn.TransitionTo(StateConnected)
+		_ = conn.TransitionTo(StateHandshaking)
+		m.emitEvent(peerID, StateHandshaking, nil)
+	}
+
+	return nil
 }

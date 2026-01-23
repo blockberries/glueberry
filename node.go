@@ -290,6 +290,14 @@ func (n *Node) EstablishEncryptedStreams(
 		return ErrNoStreamsRequested
 	}
 
+	// Check if this is an incoming connection (peer is in Disconnected or unknown state)
+	// If so, register it and transition to Handshaking state
+	currentState := n.connections.GetState(peerID)
+	if currentState == connection.StateDisconnected {
+		// This is an incoming connection - register it
+		_ = n.connections.RegisterIncomingConnection(peerID)
+	}
+
 	// Derive shared key (this also caches it in crypto module)
 	sharedKey, err := n.crypto.DeriveSharedKey(peerPubKey)
 	if err != nil {
