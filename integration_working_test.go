@@ -132,9 +132,9 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 	t.Logf("Node1: %s", node1.PeerID())
 	t.Logf("Node2: %s", node2.PeerID())
 
-	// Channels for handshake completion signaling
-	node1Done := make(chan struct{})
-	node2Done := make(chan struct{})
+	// Channels to signal when each node reaches StateEstablished
+	node1Established := make(chan struct{})
+	node2Established := make(chan struct{})
 	errChan := make(chan error, 8)
 
 	// sendHello sends a Hello message - called on StateConnected
@@ -151,26 +151,46 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 		return nil
 	}
 
-	// Node1's event handler: StateConnected → Send Hello
+	// Node1's event handler:
+	// - StateConnected → Send Hello
+	// - StateEstablished → Signal completion
 	go func() {
 		for event := range node1.Events() {
 			t.Logf("[node1] Event: %s for peer %s", event.State, event.PeerID.String()[:8])
-			if event.State == StateConnected && event.PeerID == node2.PeerID() {
-				if err := sendHello(node1, node2.PeerID(), "node1"); err != nil {
-					errChan <- err
+			switch event.State {
+			case StateConnected:
+				if event.PeerID == node2.PeerID() {
+					if err := sendHello(node1, node2.PeerID(), "node1"); err != nil {
+						errChan <- err
+						return
+					}
+				}
+			case StateEstablished:
+				if event.PeerID == node2.PeerID() {
+					t.Log("[node1] StateEstablished!")
+					close(node1Established)
 					return
 				}
 			}
 		}
 	}()
 
-	// Node2's event handler: StateConnected → Send Hello
+	// Node2's event handler (symmetric to Node1)
 	go func() {
 		for event := range node2.Events() {
 			t.Logf("[node2] Event: %s for peer %s", event.State, event.PeerID.String()[:8])
-			if event.State == StateConnected && event.PeerID == node1.PeerID() {
-				if err := sendHello(node2, node1.PeerID(), "node2"); err != nil {
-					errChan <- err
+			switch event.State {
+			case StateConnected:
+				if event.PeerID == node1.PeerID() {
+					if err := sendHello(node2, node1.PeerID(), "node2"); err != nil {
+						errChan <- err
+						return
+					}
+				}
+			case StateEstablished:
+				if event.PeerID == node1.PeerID() {
+					t.Log("[node2] StateEstablished!")
+					close(node2Established)
 					return
 				}
 			}
@@ -232,8 +252,7 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 					errChan <- err
 					return
 				}
-				t.Log("[node1] Handshake complete!")
-				close(node1Done)
+				t.Log("[node1] CompleteHandshake called")
 				return
 			}
 		}
@@ -291,8 +310,7 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 					errChan <- err
 					return
 				}
-				t.Log("[node2] Handshake complete!")
-				close(node2Done)
+				t.Log("[node2] CompleteHandshake called")
 				return
 			}
 		}
@@ -310,41 +328,27 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 		}
 		t.Logf("Connect returned (already connecting): %v", err)
 	}
-	t.Log("Node1 connect initiated - waiting for StateConnected events to trigger handshake")
+	t.Log("Node1 connect initiated - waiting for StateEstablished events")
 
-	// Wait for handshakes to complete
+	// Wait for both nodes to reach StateEstablished
 	timeout := time.After(10 * time.Second)
 	select {
-	case <-node1Done:
+	case <-node1Established:
 	case err := <-errChan:
-		t.Fatalf("Node1 handshake error: %v", err)
+		t.Fatalf("Node1 error: %v", err)
 	case <-timeout:
-		t.Fatal("Timeout waiting for node1 handshake")
+		t.Fatal("Timeout waiting for node1 StateEstablished")
 	}
 
 	select {
-	case <-node2Done:
+	case <-node2Established:
 	case err := <-errChan:
-		t.Fatalf("Node2 handshake error: %v", err)
+		t.Fatalf("Node2 error: %v", err)
 	case <-timeout:
-		t.Fatal("Timeout waiting for node2 handshake")
+		t.Fatal("Timeout waiting for node2 StateEstablished")
 	}
 
-	t.Log("Both handshakes completed!")
-
-	// Verify states
-	time.Sleep(100 * time.Millisecond)
-	state1 := node1.ConnectionState(node2.PeerID())
-	state2 := node2.ConnectionState(node1.PeerID())
-	t.Logf("Node1 -> Node2: %v", state1)
-	t.Logf("Node2 -> Node1: %v", state2)
-
-	if state1 != StateEstablished {
-		t.Errorf("Node1 state: %v, want Established", state1)
-	}
-	if state2 != StateEstablished {
-		t.Errorf("Node2 state: %v, want Established", state2)
-	}
+	t.Log("Both nodes reached StateEstablished!")
 
 	// Test encrypted messaging
 	t.Log("Testing encrypted messaging...")
