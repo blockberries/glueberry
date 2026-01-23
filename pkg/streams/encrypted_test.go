@@ -221,8 +221,10 @@ func TestEncryptedStream_ConcurrentSend(t *testing.T) {
 	mod, _ := crypto.NewModule(priv)
 	key, _ := mod.DeriveSharedKey(mod.Ed25519PublicKey())
 
-	var buf bytes.Buffer
-	stream := newMockStream(&buf, &buf)
+	// Use separate buffers to avoid concurrent access to same buffer
+	var readBuf, writeBuf bytes.Buffer
+
+	stream := newMockStream(&readBuf, &writeBuf)
 
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 100)
