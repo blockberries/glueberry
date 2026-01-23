@@ -336,12 +336,178 @@ This document tracks the implementation progress of the Glueberry P2P communicat
 
 ---
 
+## Phase 6: Connection Manager
+
+**Status:** ✅ Complete
+**Commit:** (pending)
+
+### Files Created
+- `pkg/connection/state.go` - Connection state machine
+- `pkg/connection/state_test.go` - State machine tests
+- `pkg/connection/peer.go` - PeerConnection struct
+- `pkg/connection/peer_test.go` - PeerConnection tests
+- `pkg/connection/reconnect.go` - Reconnection logic with exponential backoff
+- `pkg/connection/reconnect_test.go` - Reconnection tests
+- `pkg/connection/manager.go` - Connection Manager core
+
+### Key Functionality
+
+#### Connection State Machine (`state.go`)
+- **ConnectionState enum** with 7 states:
+  - `StateDisconnected` - No connection
+  - `StateConnecting` - Connection attempt in progress
+  - `StateConnected` - libp2p connected, awaiting handshake
+  - `StateHandshaking` - Handshake stream open
+  - `StateEstablished` - Encrypted streams active
+  - `StateReconnecting` - Attempting reconnection
+  - `StateCooldown` - Waiting after failed handshake
+
+- **State Properties:**
+  - `String()` - Human-readable representation
+  - `IsTerminal()` - Returns true for Disconnected/Cooldown
+  - `IsActive()` - Returns true for Connecting/Connected/Handshaking/Established
+  - `CanTransitionTo(target)` - Validates state transitions
+  - `ValidateTransition(target)` - Returns error for invalid transitions
+
+- **State Transition Graph:**
+  ```
+  Disconnected -> Connecting -> Connected -> Handshaking -> Established -> Disconnected
+       ↕              ↓           ↓              ↓
+  Reconnecting    Disconnected  Disconnected   Cooldown
+  ```
+
+#### PeerConnection (`peer.go`)
+- Tracks connection state and resources for a single peer
+- NOT thread-safe (manager serializes access)
+- Fields:
+  - `PeerID`, `State`, `LastStateChange`
+  - `HandshakeStream` - Active during handshaking
+  - `HandshakeTimer`/`HandshakeCancel` - Timeout enforcement
+  - `SharedKey` - ECDH-derived shared secret
+  - `EncryptedStreams` - Map of stream name to stream
+  - `ReconnectState` - Tracks reconnection attempts
+  - `CooldownUntil` - Cooldown expiration time
+  - `LastError` - Last error encountered
+
+- **Methods:**
+  - `NewPeerConnection()` - Creates in Disconnected state
+  - `TransitionTo(state)` - Validates and performs state transition
+  - `GetState()` / `SetHandshakeStream()` / `ClearHandshakeStream()`
+  - `SetSharedKey()` / `GetSharedKey()` - Deep copy semantics
+  - `SetError()` / `GetError()` - Error tracking
+  - `StartCooldown(duration)` - Enter cooldown with expiration
+  - `IsInCooldown()` / `CooldownRemaining()` - Cooldown queries
+  - `Cleanup()` - Release all resources
+
+#### Reconnection Logic (`reconnect.go`)
+- **ReconnectState** tracks attempt count, next attempt time, backoff delay
+- **BackoffCalculator** implements exponential backoff:
+  - Formula: `baseDelay * 2^attempt` capped at `maxDelay`
+  - Jitter: ±10% randomization to prevent thundering herd
+  - `NextDelay(attempt)` - Calculate delay for specific attempt
+  - `ScheduleNext(rs)` - Update reconnect state with next attempt time
+
+- **Helper:**
+  - `ShouldRetry(attempts, maxAttempts)` - Determines if more retries allowed
+  - `maxAttempts == 0` means unlimited retries
+
+#### Connection Manager (`manager.go`)
+- **ManagerConfig** struct:
+  - `HandshakeTimeout` - Max time for handshake completion
+  - `ReconnectBaseDelay` / `ReconnectMaxDelay` - Backoff parameters
+  - `ReconnectMaxAttempts` - Retry limit
+  - `FailedHandshakeCooldown` - Delay after handshake timeout
+
+- **Manager Struct:**
+  - Maps: `connections`, `reconnecting`
+  - Thread-safe with RWMutex
+  - Context for cancellation
+
+- **Core Methods:**
+  - `NewManager()` - Constructor with dependencies
+  - `Connect(peerID)` - Establishes connection and returns HandshakeStream
+    - Checks blacklist and cooldown
+    - Gets peer multiaddrs from address book
+    - Dials via libp2p
+    - Opens handshake stream with timeout
+    - Sets up timeout enforcement goroutine
+    - Emits events at each state change
+  - `Disconnect(peerID)` - Closes connection and cleans up
+  - `GetState(peerID)` - Query connection state
+  - `CancelReconnection(peerID)` - Stop reconnection attempts
+  - `OnDisconnect(peerID, err)` - Handle unexpected disconnects
+  - `Shutdown()` - Stop all connections and reconnections
+
+- **Reconnection Flow:**
+  - `startReconnection()` - Initiates reconnection goroutine
+  - `reconnectionLoop()` - Exponential backoff retry loop
+  - `attemptReconnect()` - Single reconnection attempt
+  - `handleReconnectionExhausted()` - Max attempts reached
+  - Respects blacklist during reconnection
+  - Cancellable via context
+
+- **Handshake Timeout:**
+  - `setupHandshakeTimeout()` - Creates timer with callback
+  - `handleHandshakeTimeout()` - On timeout:
+    - Closes handshake stream
+    - Disconnects peer
+    - Transitions to cooldown
+    - Schedules reconnection after cooldown
+  - `scheduleReconnectAfterCooldown()` - Delayed reconnection
+
+- **Event Emission:**
+  - `emitEvent()` - Thread-safe event emission
+  - Events emitted at all state transitions
+  - Includes error information when applicable
+
+### Test Coverage
+35 tests across 3 test files:
+
+**State Machine Tests (state_test.go):**
+- String representations
+- Terminal/Active state classification
+- 23 state transition validation tests
+- Invalid transition error cases
+
+**Reconnection Tests (reconnect_test.go):**
+- Exponential backoff calculation
+- Negative attempt handling
+- Max delay capping
+- Jitter randomization
+- ScheduleNext state updates
+- ShouldRetry logic (unlimited and limited)
+
+**PeerConnection Tests (peer_test.go):**
+- Creation and initialization
+- State transitions (valid/invalid)
+- Shared key storage (deep copy)
+- Error tracking
+- Cooldown management (active, expired)
+- Cleanup verification
+- Concurrent access safety
+
+### Design Decisions
+- Connection Manager owns all peer connections (single source of truth)
+- Events emitted at every state change for app visibility
+- Reconnection goroutines are context-cancellable
+- Handshake timeout uses time.AfterFunc for efficiency
+- Cooldown prevents rapid failed reconnection attempts
+- Blacklist checked before every connection/reconnection attempt
+- Deep copies for shared keys prevent external modification
+- Manager methods are thread-safe with RWMutex
+- PeerConnection methods use internal mutex for additional safety
+
+### Dependencies
+No new external dependencies (uses existing libp2p and internal packages)
+
+---
+
 ## Remaining Phases
 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 5 | Handshake Stream | ✅ Complete |
-| 6 | Connection Manager | Pending |
+| 6 | Connection Manager | ✅ Complete |
 | 7 | Encrypted Streams | Pending |
 | 8 | Event System | Pending |
 | 9 | Node (Public API) | Pending |
@@ -360,6 +526,7 @@ This document tracks the implementation progress of the Glueberry P2P communicat
 | `pkg/addressbook` | 34 | ✅ Pass |
 | `pkg/protocol` | 18 | ✅ Pass |
 | `pkg/streams` | 21 | ✅ Pass |
+| `pkg/connection` | 35 | ✅ Pass |
 
 All tests run with `-race` flag for race condition detection.
 
@@ -373,4 +540,4 @@ All tests run with `-race` flag for race condition detection.
 
 ---
 
-*Last updated: Phase 5 completion*
+*Last updated: Phase 6 completion*
