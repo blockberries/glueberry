@@ -646,6 +646,122 @@ Network -> Cramberry.Read -> Decrypt -> IncomingMessage channel
 
 ---
 
+## Phase 8: Event System
+
+**Status:** ✅ Complete
+**Commit:** (pending)
+
+### Files Created
+- `events.go` - Public ConnectionEvent and ConnectionState types
+- `events_test.go` - Public event type tests
+- `internal/eventdispatch/dispatcher.go` - Event dispatcher implementation
+- `internal/eventdispatch/dispatcher_test.go` - Dispatcher tests
+
+### Key Functionality
+
+#### Public Event Types (`events.go`)
+- **ConnectionState** enum (re-exported for public API):
+  - StateDisconnected, StateConnecting, StateConnected
+  - StateHandshaking, StateEstablished
+  - StateReconnecting, StateCooldown
+  - `String()` method for human-readable representation
+
+- **ConnectionEvent** struct for state change notifications:
+  - `PeerID` - Peer the event relates to
+  - `State` - New connection state
+  - `Error` - Error information (nil for successful changes)
+  - `Timestamp` - When event occurred
+  - `IsError()` - Helper to check if event represents an error
+
+#### Event Dispatcher (`internal/eventdispatch/dispatcher.go`)
+- Manages buffered event channel
+- Non-blocking event emission prevents slow consumers from blocking
+- Thread-safe with mutex protection
+
+**Dispatcher Struct:**
+- `events` - Buffered channel of Event
+- `closed` - Closure flag
+- `mu` - Mutex for thread-safe access
+
+**Methods:**
+- `NewDispatcher(bufferSize)` - Creates dispatcher with sized buffer
+- `EmitEvent(event)` - Non-blocking event emission:
+  - Converts connection.Event to internal Event type
+  - Uses select with default for non-blocking send
+  - Drops events if channel full (prevents blocking)
+  - No-op if dispatcher closed
+- `Events()` - Returns receive-only channel for consumption
+- `Close()` - Closes events channel (idempotent)
+- `IsClosed()` - Thread-safe closed check
+
+**Non-Blocking Semantics:**
+```go
+select {
+case d.events <- evt:
+    // Event sent
+default:
+    // Channel full, drop event
+}
+```
+
+### Integration Points
+- Connection Manager already uses EventEmitter interface
+- EventEmitter.EmitEvent() called at all state transitions:
+  - Connect: Connecting -> Connected -> Handshaking
+  - Disconnect: Disconnected
+  - Reconnect: Reconnecting -> Connecting/Disconnected
+  - Timeout: Cooldown
+  - Errors: Disconnected with error
+
+### Test Coverage
+14 tests across 2 test files:
+
+**Public Events Tests (events_test.go):**
+- ConnectionState.String() for all states
+- ConnectionEvent.IsError() for nil and non-nil errors
+
+**Dispatcher Tests (dispatcher_test.go):**
+- Dispatcher creation and initialization
+- Single event emission and reception
+- Multiple sequential events (5 events)
+- Full buffer handling (event dropping)
+- Close behavior and idempotency
+- EmitEvent after close (no-op, no panic)
+- Concurrent emission (10 goroutines × 10 events)
+- Event type conversion (connection.Event -> Event)
+
+### Design Decisions
+- **Non-blocking emission:** Slow consumers cannot block connection operations
+  - Critical for preventing DoS via slow event consumption
+  - Trade-off: Events may be dropped under extreme load
+  - Alternative would be blocking, which risks deadlock
+
+- **Buffered channel:** Provides elasticity for bursty events
+  - Default buffer size: 100 events
+  - Configurable by application
+
+- **Separate internal package:** eventdispatch in internal/ keeps implementation private
+  - Public API only exposes ConnectionEvent type
+  - Dispatcher is used internally by Node
+
+- **Event conversion:** connection.Event -> eventdispatch.Event -> public via channel
+  - Allows internal and external types to evolve independently
+
+- **Thread-safe by default:** All Dispatcher methods safe for concurrent use
+  - Mutex protects closed flag
+  - Channel operations are inherently thread-safe
+
+- **Graceful degradation:** Event drops are silent
+  - In production deployment, could add metrics/logging
+  - Prevents event system from becoming reliability bottleneck
+
+### Event Flow
+```
+Connection Manager -> EmitEvent() -> Dispatcher -> Non-blocking send -> Events channel -> Application
+```
+
+---
+
 ## Remaining Phases
 
 | Phase | Description | Status |
@@ -653,7 +769,7 @@ Network -> Cramberry.Read -> Decrypt -> IncomingMessage channel
 | 5 | Handshake Stream | ✅ Complete |
 | 6 | Connection Manager | ✅ Complete |
 | 7 | Encrypted Streams | ✅ Complete |
-| 8 | Event System | Pending |
+| 8 | Event System | ✅ Complete |
 | 9 | Node (Public API) | Pending |
 | 10 | Incoming Connection Handling | Pending |
 | 11 | Integration Testing | Pending |
@@ -665,12 +781,13 @@ Network -> Cramberry.Read -> Decrypt -> IncomingMessage channel
 
 | Package | Tests | Status |
 |---------|-------|--------|
-| `glueberry` (root) | 9 | ✅ Pass |
+| `glueberry` (root) | 11 | ✅ Pass |
 | `pkg/crypto` | 45 | ✅ Pass |
 | `pkg/addressbook` | 34 | ✅ Pass |
 | `pkg/protocol` | 18 | ✅ Pass |
 | `pkg/streams` | 48 | ✅ Pass |
 | `pkg/connection` | 35 | ✅ Pass |
+| `internal/eventdispatch` | 12 | ✅ Pass |
 
 All tests run with `-race` flag for race condition detection.
 
@@ -684,4 +801,4 @@ All tests run with `-race` flag for race condition detection.
 
 ---
 
-*Last updated: Phase 7 completion*
+*Last updated: Phase 8 completion*
