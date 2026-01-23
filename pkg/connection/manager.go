@@ -564,3 +564,71 @@ func (m *Manager) Shutdown() {
 	m.reconnecting = make(map[peer.ID]*ReconnectState)
 }
 
+// GetSharedKey retrieves the shared encryption key for a peer.
+// Returns nil if no shared key exists (handshake not completed).
+func (m *Manager) GetSharedKey(peerID peer.ID) []byte {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if conn, exists := m.connections[peerID]; exists {
+		return conn.GetSharedKey()
+	}
+	return nil
+}
+
+// SetSharedKey stores the shared encryption key for a peer.
+// This should be called after successful handshake.
+func (m *Manager) SetSharedKey(peerID peer.ID, key []byte) error {
+	m.mu.RLock()
+	conn, exists := m.connections[peerID]
+	m.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("peer %s not connected", peerID)
+	}
+
+	conn.SetSharedKey(key)
+	return nil
+}
+
+// MarkEstablished transitions a connection to the Established state.
+// This should be called after encrypted streams are successfully set up.
+func (m *Manager) MarkEstablished(peerID peer.ID) error {
+	m.mu.RLock()
+	conn, exists := m.connections[peerID]
+	m.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("peer %s not connected", peerID)
+	}
+
+	// Clear handshake resources
+	conn.ClearHandshakeStream()
+
+	// Transition to established
+	m.mu.Lock()
+	err := conn.TransitionTo(StateEstablished)
+	m.mu.Unlock()
+
+	if err != nil {
+		return err
+	}
+
+	m.emitEvent(peerID, StateEstablished, nil)
+	return nil
+}
+
+// GetOrCreateConnection gets an existing connection or creates a new one for incoming connections.
+func (m *Manager) GetOrCreateConnection(peerID peer.ID) *PeerConnection {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	conn, exists := m.connections[peerID]
+	if !exists {
+		conn = NewPeerConnection(peerID)
+		m.connections[peerID] = conn
+	}
+	return conn
+}
+
+

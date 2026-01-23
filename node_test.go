@@ -281,6 +281,22 @@ func TestNode_Events(t *testing.T) {
 	}
 }
 
+func TestNode_IncomingHandshakes(t *testing.T) {
+	priv := generateNodeTestKey(t)
+	listenAddr, _ := multiaddr.NewMultiaddr("/ip4/127.0.0.1/tcp/0")
+	abPath := tempAddressBookPath(t)
+
+	cfg := NewConfig(priv, abPath, []multiaddr.Multiaddr{listenAddr})
+
+	node, _ := New(cfg)
+	defer node.Stop()
+
+	handshakesChan := node.IncomingHandshakes()
+	if handshakesChan == nil {
+		t.Error("IncomingHandshakes() should return non-nil channel")
+	}
+}
+
 // Helper to convert Ed25519 public key to libp2p crypto key
 func ed25519ToCryptoKey(pub ed25519.PublicKey) libp2pcrypto.PubKey {
 	key, _ := libp2pcrypto.UnmarshalEd25519PublicKey(pub)

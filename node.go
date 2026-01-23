@@ -12,6 +12,7 @@ import (
 	"github.com/blockberries/glueberry/pkg/crypto"
 	"github.com/blockberries/glueberry/pkg/protocol"
 	"github.com/blockberries/glueberry/pkg/streams"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -32,8 +33,9 @@ type Node struct {
 	eventDispatch  *eventdispatch.Dispatcher
 
 	// Channels
-	events   <-chan eventdispatch.ConnectionEvent
-	messages chan streams.IncomingMessage
+	events            <-chan eventdispatch.ConnectionEvent
+	messages          chan streams.IncomingMessage
+	incomingHandshakes chan protocol.IncomingHandshake
 
 	// Lifecycle
 	ctx      context.Context
@@ -77,6 +79,9 @@ func New(cfg *Config) (*Node, error) {
 	// Create message channel
 	messagesChan := make(chan streams.IncomingMessage, cfg.MessageBufferSize)
 
+	// Create incoming handshakes channel
+	incomingHandshakesChan := make(chan protocol.IncomingHandshake, cfg.EventBufferSize)
+
 	// Create connection gater
 	gater := protocol.NewConnectionGater(addrBook)
 
@@ -111,18 +116,19 @@ func New(cfg *Config) (*Node, error) {
 	connMgr := connection.NewManager(ctx, libp2pHost, addrBook, connMgrConfig, dispatcher)
 
 	return &Node{
-		config:        cfg,
-		crypto:        cryptoModule,
-		addressBook:   addrBook,
-		host:          libp2pHost,
-		connections:   connMgr,
-		streamManager: streamMgr,
-		eventDispatch: dispatcher,
-		events:        dispatcher.Events(),
-		messages:      messagesChan,
-		ctx:           ctx,
-		cancel:        cancel,
-		started:       false,
+		config:             cfg,
+		crypto:             cryptoModule,
+		addressBook:        addrBook,
+		host:               libp2pHost,
+		connections:        connMgr,
+		streamManager:      streamMgr,
+		eventDispatch:      dispatcher,
+		events:             dispatcher.Events(),
+		messages:           messagesChan,
+		incomingHandshakes: incomingHandshakesChan,
+		ctx:                ctx,
+		cancel:             cancel,
+		started:            false,
 	}, nil
 }
 
@@ -136,9 +142,14 @@ func (n *Node) Start() error {
 		return ErrNodeAlreadyStarted
 	}
 
+	// Register handshake protocol handler
+	handshakeHandler := protocol.NewHandshakeHandler(n.config.HandshakeTimeout, n.incomingHandshakes)
+	n.host.LibP2PHost().SetStreamHandler(protocol.HandshakeProtocolID, handshakeHandler.HandleStream)
+
+	// Note: Encrypted stream handlers are registered dynamically when streams are established
+	// because we need the shared key which is only available after handshake
+
 	n.started = true
-	// Note: libp2p host is already listening after NewHost()
-	// No additional startup required for now
 
 	return nil
 }
@@ -168,6 +179,9 @@ func (n *Node) Stop() error {
 
 	// Close messages channel
 	close(n.messages)
+
+	// Close incoming handshakes channel
+	close(n.incomingHandshakes)
 
 	n.started = false
 
@@ -261,6 +275,7 @@ func (n *Node) CancelReconnection(peerID peer.ID) error {
 
 // EstablishEncryptedStreams derives a shared key and establishes encrypted streams.
 // This should be called after successful handshake with the peer's Ed25519 public key.
+// It also registers handlers for incoming streams from the remote peer.
 func (n *Node) EstablishEncryptedStreams(
 	peerID peer.ID,
 	peerPubKey ed25519.PublicKey,
@@ -277,6 +292,21 @@ func (n *Node) EstablishEncryptedStreams(
 		return ErrNoStreamsRequested
 	}
 
+	// Derive shared key (this also caches it in crypto module)
+	sharedKey, err := n.crypto.DeriveSharedKey(peerPubKey)
+	if err != nil {
+		return fmt.Errorf("failed to derive shared key: %w", err)
+	}
+
+	// Store shared key in connection manager for incoming stream handling
+	if err := n.connections.SetSharedKey(peerID, sharedKey); err != nil {
+		return fmt.Errorf("failed to store shared key: %w", err)
+	}
+
+	// Register handlers for incoming encrypted streams
+	// This allows the remote peer to open streams to us
+	n.registerIncomingStreamHandlers(peerID, streamNames, sharedKey)
+
 	// Establish encrypted streams via stream manager
 	if err := n.streamManager.EstablishStreams(peerID, peerPubKey, streamNames); err != nil {
 		return err
@@ -287,10 +317,45 @@ func (n *Node) EstablishEncryptedStreams(
 		// Log but don't fail - streams are already established
 	}
 
-	// TODO: Update connection state to Established
-	// This requires adding a method to connection.Manager
+	// Update connection state to Established
+	if err := n.connections.MarkEstablished(peerID); err != nil {
+		// Log but don't fail - streams are already established
+	}
 
 	return nil
+}
+
+// registerIncomingStreamHandlers registers protocol handlers for incoming encrypted streams.
+func (n *Node) registerIncomingStreamHandlers(peerID peer.ID, streamNames []string, sharedKey []byte) {
+	for _, streamName := range streamNames {
+		protoID := protocol.StreamProtocolID(streamName)
+
+		// Create handler for this stream
+		handler := func(stream network.Stream) {
+			remotePeerID := stream.Conn().RemotePeer()
+
+			// Verify it's the expected peer
+			// (In practice, any peer with the shared key could connect,
+			// but we'll accept streams from any peer that has completed handshake)
+
+			// Get shared key for this peer
+			key := n.connections.GetSharedKey(remotePeerID)
+			if key == nil {
+				// No shared key - reject stream
+				stream.Reset()
+				return
+			}
+
+			// Accept the incoming stream
+			if err := n.streamManager.HandleIncomingStream(remotePeerID, streamName, stream, key); err != nil {
+				// Failed to create encrypted stream
+				stream.Reset()
+				return
+			}
+		}
+
+		n.host.LibP2PHost().SetStreamHandler(protoID, handler)
+	}
 }
 
 // Send sends data over an encrypted stream to a peer.
@@ -330,4 +395,10 @@ func (n *Node) Events() <-chan ConnectionEvent {
 	}()
 
 	return publicEvents
+}
+
+// IncomingHandshakes returns the channel for receiving incoming handshake streams.
+// The application should read from this channel to handle incoming connection requests.
+func (n *Node) IncomingHandshakes() <-chan protocol.IncomingHandshake {
+	return n.incomingHandshakes
 }

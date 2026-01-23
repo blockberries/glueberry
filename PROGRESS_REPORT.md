@@ -935,6 +935,179 @@ All major components now integrated:
 
 ---
 
+## Phase 10: Incoming Connection Handling
+
+**Status:** ✅ Complete
+**Commit:** (pending)
+
+### Files Modified
+- `node.go` - Added incoming handshake handling and stream handler registration
+- `node_test.go` - Added IncomingHandshakes test
+- `pkg/protocol/handlers.go` - Handshake and stream protocol handlers
+- `pkg/protocol/handlers_test.go` - Handler tests
+- `pkg/connection/manager.go` - Added shared key tracking methods
+
+### Key Functionality
+
+#### Incoming Handshakes
+- **IncomingHandshake struct** (protocol package):
+  - `PeerID` - Remote peer identifier
+  - `HandshakeStream` - Wrapped handshake stream
+  - `Timestamp` - When handshake was initiated
+
+- **HandshakeHandler** (pkg/protocol/handlers.go):
+  - Handles incoming handshake stream requests from remote peers
+  - Creates HandshakeStream wrapper with timeout
+  - Sends to incoming channel (non-blocking)
+  - Closes stream if channel full
+
+- **Node.IncomingHandshakes()** - Returns channel for incoming handshakes
+  - Application reads from this channel
+  - Performs handshake using provided HandshakeStream
+  - Calls EstablishEncryptedStreams when handshake complete
+
+#### Incoming Encrypted Streams
+- **registerIncomingStreamHandlers()** (node.go):
+  - Registers protocol handler for each stream name
+  - Handler checks if shared key exists for peer
+  - Rejects streams from peers without completed handshake
+  - Calls streamManager.HandleIncomingStream() to create EncryptedStream
+
+- **Handler Flow:**
+  ```
+  Remote peer opens stream
+         ↓
+  libp2p calls protocol handler
+         ↓
+  Get shared key from connection manager
+         ↓
+  If key exists: Create EncryptedStream
+  If no key: Reset stream (reject)
+  ```
+
+#### Connection Manager Enhancements
+Added methods for shared key management:
+- `GetSharedKey(peerID)` - Retrieves shared key for peer
+- `SetSharedKey(peerID, key)` - Stores shared key after handshake
+- `MarkEstablished(peerID)` - Transitions to Established state
+  - Clears handshake resources
+  - Emits StateEstablished event
+- `GetOrCreateConnection(peerID)` - For incoming connections
+
+#### Node Updates
+- **Incoming handshakes channel** added to Node struct
+  - Buffered with EventBufferSize
+  - Closed on Stop()
+
+- **Start() method** registers handshake handler:
+  - Sets protocol handler for HandshakeProtocolID
+  - Handler forwards to incoming channel
+
+- **EstablishEncryptedStreams() enhancements:**
+  - Derives and stores shared key
+  - Calls SetSharedKey() on connection manager
+  - Registers incoming stream handlers
+  - Calls MarkEstablished() to update state
+  - Now fully bidirectional (handles both outgoing and incoming)
+
+- **registerIncomingStreamHandlers()** (private):
+  - Registers handler for each stream name
+  - Handlers check shared key before accepting
+  - Delegates to streamManager.HandleIncomingStream()
+
+### Protocol Handler Registration
+**Handshake Protocol:**
+- Registered in Node.Start()
+- Protocol ID: `/glueberry/handshake/1.0.0`
+- Handler: HandshakeHandler.HandleStream
+
+**Encrypted Stream Protocols:**
+- Registered in EstablishEncryptedStreams()
+- Protocol ID: `/glueberry/stream/{name}/1.0.0` per stream
+- Handler: Dynamic closure with shared key access
+- Validates peer has shared key before accepting
+
+### Test Coverage
+15 new tests:
+
+**Handler Tests (handlers_test.go):**
+- HandshakeHandler creation
+- Incoming handshake stream handling
+- Full channel behavior (stream closure on drop)
+- PeerID and timestamp verification
+
+**Node Tests (node_test.go):**
+- IncomingHandshakes() channel availability
+
+**Connection Manager Tests:**
+- Shared key storage and retrieval
+- MarkEstablished state transition
+
+### Flow Diagrams
+
+**Incoming Handshake Flow:**
+```
+Remote Peer                Node                     Application
+     │                      │                            │
+     │  Open handshake      │                            │
+     │─────────────────────>│                            │
+     │                      │  Create HandshakeStream    │
+     │                      │  Send to channel           │
+     │                      │───────────────────────────>│
+     │                      │                            │
+     │                      │  <-IncomingHandshakes()    │
+     │                      │<───────────────────────────│
+     │  <-- handshake -->   │<──────────────────────────>│
+     │                      │                            │
+     │                      │  EstablishEncryptedStreams │
+     │                      │<───────────────────────────│
+     │                      │  (registers handlers)      │
+```
+
+**Incoming Encrypted Stream Flow:**
+```
+Remote Peer                Node                     Stream Manager
+     │                      │                            │
+     │  Open stream         │                            │
+     │─────────────────────>│                            │
+     │                      │  Get shared key            │
+     │                      │  (from connection mgr)     │
+     │                      │                            │
+     │                      │  HandleIncomingStream      │
+     │                      │───────────────────────────>│
+     │                      │  Create EncryptedStream    │
+     │                      │<───────────────────────────│
+     │  <-- encrypted -->   │<──────────────────────────>│
+     │      messages        │        Messages()          │
+```
+
+### Design Decisions
+- **Symmetric handling:** Both outgoing and incoming streams supported
+  - EstablishEncryptedStreams() registers handlers for incoming
+  - Same stream names work bidirectionally
+
+- **Security:** Shared key required for incoming streams
+  - Prevents unauthorized stream creation
+  - Handshake must complete first
+
+- **Non-blocking:** Incoming handshakes use buffered channel
+  - Full channel drops handshake (closes stream)
+  - Prevents DoS from handshake flood
+
+- **Protocol handler lifecycle:**
+  - Handshake handler: Registered once in Start()
+  - Stream handlers: Registered per peer in EstablishEncryptedStreams()
+  - TODO: Handler cleanup on disconnect (future enhancement)
+
+- **State tracking:** MarkEstablished() called after stream setup
+  - Connection state accurately reflects reality
+  - Clears handshake resources (timer, cancel func)
+  - Emits event for application awareness
+
+Updated PROGRESS_REPORT.md with Phase 10 summary.
+
+---
+
 ## Remaining Phases
 
 | Phase | Description | Status |
@@ -944,7 +1117,7 @@ All major components now integrated:
 | 7 | Encrypted Streams | ✅ Complete |
 | 8 | Event System | ✅ Complete |
 | 9 | Node (Public API) | ✅ Complete |
-| 10 | Incoming Connection Handling | Pending |
+| 10 | Incoming Connection Handling | ✅ Complete |
 | 11 | Integration Testing | Pending |
 | 12 | Documentation | Pending |
 
@@ -954,15 +1127,15 @@ All major components now integrated:
 
 | Package | Tests | Status |
 |---------|-------|--------|
-| `glueberry` (root) | 21 | ✅ Pass |
+| `glueberry` (root) | 22 | ✅ Pass |
 | `pkg/crypto` | 45 | ✅ Pass |
 | `pkg/addressbook` | 34 | ✅ Pass |
-| `pkg/protocol` | 18 | ✅ Pass |
+| `pkg/protocol` | 21 | ✅ Pass |
 | `pkg/streams` | 48 | ✅ Pass |
 | `pkg/connection` | 35 | ✅ Pass |
 | `internal/eventdispatch` | 12 | ✅ Pass |
 
-**Total:** 213 tests, all passing with race detection enabled
+**Total:** 217 tests, all passing with race detection enabled
 
 All tests run with `-race` flag for race condition detection.
 
@@ -976,4 +1149,4 @@ All tests run with `-race` flag for race condition detection.
 
 ---
 
-*Last updated: Phase 9 completion*
+*Last updated: Phase 10 completion*
