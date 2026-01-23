@@ -139,18 +139,17 @@ node.Connect(peerID)
 // Your event handler should react by sending the first handshake message
 ```
 
-### 3. Handle Handshake Messages (Event-Driven)
+### 3. Handle Handshake Messages (Two-Phase API)
 
-The handshake follows a reactive, event-driven flow where each message triggers the next step:
+The handshake uses a two-phase completion to prevent race conditions:
 
 ```go
 // StateConnected event → Send Hello
 // Receive Hello → Send PubKey
-// Receive PubKey → Send Complete
-// Receive Complete → Call CompleteHandshake()
+// Receive PubKey → PrepareStreams() + Send Complete
+// Receive Complete → FinalizeHandshake()
 
-var peerPubKey ed25519.PublicKey
-var gotPubKey, gotComplete bool
+var streamsPrepared, gotComplete bool
 
 for msg := range node.Messages() {
     if msg.StreamName == streams.HandshakeStreamName {
@@ -160,24 +159,31 @@ for msg := range node.Messages() {
             node.Send(msg.PeerID, streams.HandshakeStreamName, pubKeyMsg)
 
         case msgPubKey:
-            // Receive PubKey → Store it and send Complete
-            peerPubKey = ed25519.PublicKey(msg.Data[1:])
-            gotPubKey = true
+            // Receive PubKey → Prepare streams (ready to receive encrypted messages)
+            peerPubKey := ed25519.PublicKey(msg.Data[1:])
+            node.PrepareStreams(msg.PeerID, peerPubKey, []string{"messages"})
+            streamsPrepared = true
+            // Send Complete to signal we're ready
             node.Send(msg.PeerID, streams.HandshakeStreamName, completeMsg)
 
         case msgComplete:
-            // Receive Complete → Ready to finalize
+            // Receive Complete → Peer is ready
             gotComplete = true
         }
 
-        // When we have both PubKey and Complete, finalize the handshake
-        if gotPubKey && gotComplete {
-            node.CompleteHandshake(msg.PeerID, peerPubKey, []string{"messages"})
-            gotPubKey, gotComplete = false, false // Reset for next peer
+        // When both sides are ready, finalize the handshake
+        if streamsPrepared && gotComplete {
+            node.FinalizeHandshake(msg.PeerID)
+            streamsPrepared, gotComplete = false, false // Reset for next peer
         }
     }
 }
 ```
+
+**Why Two Phases?**
+- `PrepareStreams()` derives the shared key and registers stream handlers, so the node can receive encrypted messages immediately
+- `FinalizeHandshake()` transitions to `StateEstablished` only after the peer confirms it's also ready
+- This prevents race conditions where one peer sends encrypted messages before the other has prepared its streams
 
 ### 4. Send and Receive Encrypted Messages
 
@@ -294,9 +300,9 @@ cfg := glueberry.NewConfig(
 2. **StateConnected event** - libp2p connected, handshake stream ready, timeout starts
 3. **App sends Hello** - React to StateConnected by sending Hello message
 4. **Receive Hello → Send PubKey** - On receiving Hello, respond with public key
-5. **Receive PubKey → Send Complete** - On receiving PubKey, store it, send Complete
-6. **Receive Complete → CompleteHandshake()** - When both PubKey and Complete received, finalize
-7. **StateEstablished** - Encrypted streams become available, timeout cancelled
+5. **Receive PubKey → PrepareStreams() + Send Complete** - Prepare streams, signal readiness
+6. **Receive Complete → FinalizeHandshake()** - When peer confirms ready, finalize
+7. **StateEstablished** - Encrypted streams active, timeout cancelled
 8. **App sends/receives** - Messages encrypted transparently
 
 ### Encryption
@@ -333,7 +339,11 @@ cfg := glueberry.NewConfig(
 - `Disconnect(peerID)` - Close connection
 - `ConnectionState(peerID)` - Query state
 - `CancelReconnection(peerID)` - Stop reconnection
-- `CompleteHandshake(peerID, pubKey, streamNames)` - Complete handshake and setup encrypted streams
+
+**Handshake (Two-Phase):**
+- `PrepareStreams(peerID, pubKey, streamNames)` - Derive shared key, register stream handlers (call on receiving PubKey)
+- `FinalizeHandshake(peerID)` - Cancel timeout, transition to StateEstablished (call on receiving Complete)
+- `CompleteHandshake(peerID, pubKey, streamNames)` - Convenience: calls PrepareStreams + FinalizeHandshake
 
 **Messaging:**
 - `Send(peerID, streamName, data)` - Send message (handshake or encrypted)

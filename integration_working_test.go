@@ -197,13 +197,12 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 		}
 	}()
 
-	// Node1's message handler - symmetric handshake protocol:
+	// Node1's message handler - symmetric handshake protocol (two-phase):
 	// Receive Hello → Send PubKey
-	// Receive PubKey → Send Complete
-	// Receive Complete (and have PubKey) → CompleteHandshake
+	// Receive PubKey → PrepareStreams() + Send Complete
+	// Receive Complete → FinalizeHandshake()
 	go func() {
-		var peerPubKey ed25519.PublicKey
-		var gotPubKey, gotComplete bool
+		var streamsPrepared, gotComplete bool
 
 		for msg := range node1.Messages() {
 			if msg.StreamName != streams.HandshakeStreamName {
@@ -230,9 +229,15 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 
 			case *PubKeyMessage:
 				t.Log("[node1] Received PubKeyMessage")
-				peerPubKey = ed25519.PublicKey(m.PublicKey)
-				gotPubKey = true
-				// Receive PubKey → Send Complete
+				peerPubKey := ed25519.PublicKey(m.PublicKey)
+				// Receive PubKey → PrepareStreams (ready to receive encrypted messages)
+				if err := node1.PrepareStreams(node2.PeerID(), peerPubKey, []string{"messages"}); err != nil {
+					errChan <- err
+					return
+				}
+				streamsPrepared = true
+				t.Log("[node1] PrepareStreams called")
+				// Send Complete to signal we're ready
 				completeMsg := CompleteMessage{Success: true}
 				data, _ := marshalHandshakeMsg(completeMsg)
 				if err := node1.Send(node2.PeerID(), streams.HandshakeStreamName, data); err != nil {
@@ -246,13 +251,13 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 				gotComplete = true
 			}
 
-			// Receive Complete (and have PubKey) → CompleteHandshake
-			if gotPubKey && gotComplete {
-				if err := node1.CompleteHandshake(node2.PeerID(), peerPubKey, []string{"messages"}); err != nil {
+			// Receive Complete (and streams prepared) → FinalizeHandshake
+			if streamsPrepared && gotComplete {
+				if err := node1.FinalizeHandshake(node2.PeerID()); err != nil {
 					errChan <- err
 					return
 				}
-				t.Log("[node1] CompleteHandshake called")
+				t.Log("[node1] FinalizeHandshake called")
 				return
 			}
 		}
@@ -260,8 +265,7 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 
 	// Node2's message handler - identical to Node1 (true symmetry)
 	go func() {
-		var peerPubKey ed25519.PublicKey
-		var gotPubKey, gotComplete bool
+		var streamsPrepared, gotComplete bool
 
 		for msg := range node2.Messages() {
 			if msg.StreamName != streams.HandshakeStreamName {
@@ -288,9 +292,15 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 
 			case *PubKeyMessage:
 				t.Log("[node2] Received PubKeyMessage")
-				peerPubKey = ed25519.PublicKey(m.PublicKey)
-				gotPubKey = true
-				// Receive PubKey → Send Complete
+				peerPubKey := ed25519.PublicKey(m.PublicKey)
+				// Receive PubKey → PrepareStreams (ready to receive encrypted messages)
+				if err := node2.PrepareStreams(node1.PeerID(), peerPubKey, []string{"messages"}); err != nil {
+					errChan <- err
+					return
+				}
+				streamsPrepared = true
+				t.Log("[node2] PrepareStreams called")
+				// Send Complete to signal we're ready
 				completeMsg := CompleteMessage{Success: true}
 				data, _ := marshalHandshakeMsg(completeMsg)
 				if err := node2.Send(node1.PeerID(), streams.HandshakeStreamName, data); err != nil {
@@ -304,13 +314,13 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 				gotComplete = true
 			}
 
-			// Receive Complete (and have PubKey) → CompleteHandshake
-			if gotPubKey && gotComplete {
-				if err := node2.CompleteHandshake(node1.PeerID(), peerPubKey, []string{"messages"}); err != nil {
+			// Receive Complete (and streams prepared) → FinalizeHandshake
+			if streamsPrepared && gotComplete {
+				if err := node2.FinalizeHandshake(node1.PeerID()); err != nil {
 					errChan <- err
 					return
 				}
-				t.Log("[node2] CompleteHandshake called")
+				t.Log("[node2] FinalizeHandshake called")
 				return
 			}
 		}
@@ -330,8 +340,9 @@ func TestIntegration_SymmetricHandshake(t *testing.T) {
 	}
 	t.Log("Node1 connect initiated - waiting for StateEstablished events")
 
-	// Wait for both nodes to reach StateEstablished
+	// Wait for nodes to reach StateEstablished
 	timeout := time.After(10 * time.Second)
+
 	select {
 	case <-node1Established:
 	case err := <-errChan:

@@ -302,21 +302,22 @@ func (n *Node) Disconnect(peerID peer.ID) error {
 	return n.connections.Disconnect(peerID)
 }
 
-// CompleteHandshake finalizes the handshake and establishes encrypted streams.
-// This should be called after both nodes have exchanged handshake messages
-// on the "handshake" stream and verified the peer's identity.
+// PrepareStreams prepares encrypted streams for communication with a peer.
+// This should be called when the peer's public key is received during handshake.
 //
 // The method:
-// 1. Cancels the handshake timeout
-// 2. Derives the shared encryption key from the peer's public key
-// 3. Closes the unencrypted "handshake" stream
-// 4. Registers handlers for incoming encrypted streams
-// 5. Stores the peer's public key in the address book
-// 6. Transitions the connection to StateEstablished
+// 1. Derives the shared encryption key from the peer's public key
+// 2. Registers handlers for incoming encrypted streams
+// 3. Stores the peer's public key in the address book
 //
-// After calling this method, the application can send/receive encrypted messages
-// on the specified stream names using Send() and Messages().
-func (n *Node) CompleteHandshake(
+// After calling this method, the node is ready to send/receive encrypted messages,
+// but the connection is not yet in StateEstablished. Call FinalizeHandshake() after
+// receiving confirmation from the peer to complete the handshake.
+//
+// This two-phase approach ensures both peers are ready before transitioning to
+// StateEstablished, avoiding race conditions where one peer sends encrypted messages
+// before the other is ready to receive them.
+func (n *Node) PrepareStreams(
 	peerID peer.ID,
 	peerPubKey ed25519.PublicKey,
 	streamNames []string,
@@ -332,42 +333,76 @@ func (n *Node) CompleteHandshake(
 		return ErrNoStreamsRequested
 	}
 
-	// 1. Cancel handshake timeout
-	if err := n.connections.CancelHandshakeTimeout(peerID); err != nil {
-		return fmt.Errorf("failed to cancel handshake timeout: %w", err)
-	}
-
-	// 2. Derive shared key
+	// 1. Derive shared key
 	sharedKey, err := n.crypto.DeriveSharedKey(peerPubKey)
 	if err != nil {
 		return fmt.Errorf("failed to derive shared key: %w", err)
 	}
 
-	// 3. Store shared key in connection manager
+	// 2. Store shared key in connection manager
 	if err := n.connections.SetSharedKey(peerID, sharedKey); err != nil {
 		return fmt.Errorf("failed to store shared key: %w", err)
 	}
 
-	// 4. Close handshake stream (non-fatal - may not exist if we were the receiver)
-	_ = n.streamManager.CloseHandshakeStream(peerID)
-
-	// 5. Register handlers for incoming encrypted streams
+	// 3. Register handlers for incoming encrypted streams
 	n.registerIncomingStreamHandlers(streamNames)
 
-	// 6. Establish encrypted streams via stream manager (lazy opening)
+	// 4. Establish encrypted streams via stream manager (lazy opening)
 	if err := n.streamManager.EstablishStreams(peerID, peerPubKey, streamNames); err != nil {
 		return err
 	}
 
-	// 7. Store public key in address book
+	// 5. Store public key in address book
 	_ = n.addressBook.UpdatePublicKey(peerID, peerPubKey)
 
-	// 8. Transition to StateEstablished
+	return nil
+}
+
+// FinalizeHandshake completes the handshake and transitions to StateEstablished.
+// This should be called after receiving confirmation (e.g., Complete message) from the peer,
+// indicating they have also called PrepareStreams and are ready for encrypted communication.
+//
+// The method:
+// 1. Cancels the handshake timeout
+// 2. Closes the unencrypted "handshake" stream
+// 3. Transitions the connection to StateEstablished
+func (n *Node) FinalizeHandshake(peerID peer.ID) error {
+	n.startMu.Lock()
+	if !n.started {
+		n.startMu.Unlock()
+		return ErrNodeNotStarted
+	}
+	n.startMu.Unlock()
+
+	// 1. Cancel handshake timeout
+	if err := n.connections.CancelHandshakeTimeout(peerID); err != nil {
+		return fmt.Errorf("failed to cancel handshake timeout: %w", err)
+	}
+
+	// 2. Close handshake stream (non-fatal - may not exist if we were the receiver)
+	_ = n.streamManager.CloseHandshakeStream(peerID)
+
+	// 3. Transition to StateEstablished
 	if err := n.connections.MarkEstablished(peerID); err != nil {
 		return fmt.Errorf("failed to mark connection as established: %w", err)
 	}
 
 	return nil
+}
+
+// CompleteHandshake is a convenience method that calls PrepareStreams followed by FinalizeHandshake.
+// Use this for simple cases where you want to complete the handshake in one step.
+// For better control over timing (especially in scenarios where peers may complete at different times),
+// use PrepareStreams and FinalizeHandshake separately.
+func (n *Node) CompleteHandshake(
+	peerID peer.ID,
+	peerPubKey ed25519.PublicKey,
+	streamNames []string,
+) error {
+	if err := n.PrepareStreams(peerID, peerPubKey, streamNames); err != nil {
+		return err
+	}
+	return n.FinalizeHandshake(peerID)
 }
 
 // ConnectionState returns the current connection state for a peer.

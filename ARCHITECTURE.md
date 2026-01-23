@@ -245,15 +245,17 @@ type IncomingMessage struct {
 }
 ```
 
-**Stream Setup (Lazy Opening):**
-1. App calls `CompleteHandshake(peerID, peerPubKey, streamNames)`
+**Stream Setup (Two-Phase, Lazy Opening):**
+1. App calls `PrepareStreams(peerID, peerPubKey, streamNames)` when receiving peer's PubKey
 2. Crypto module derives shared key from ECDH
-3. Stream names are registered but streams are not opened yet
-4. On first `Send()` to a stream name:
+3. Stream names are registered, handlers ready to accept incoming encrypted messages
+4. App calls `FinalizeHandshake(peerID)` when receiving peer's Complete message
+5. Connection transitions to StateEstablished
+6. On first `Send()` to a stream name:
    - Open libp2p stream with protocol ID `/glueberry/stream/<name>/1.0.0`
    - Wrap with encryption layer
    - Start read goroutine for incoming messages
-5. Incoming streams are accepted and wrapped on arrival
+7. Incoming streams are accepted and wrapped on arrival
 
 **Message Flow:**
 
@@ -357,8 +359,10 @@ func (n *Node) Disconnect(peerID peer.ID) error
 func (n *Node) CancelReconnection(peerID peer.ID) error
 func (n *Node) ConnectionState(peerID peer.ID) ConnectionState
 
-// Handshake Completion (call after exchanging handshake messages)
-func (n *Node) CompleteHandshake(peerID peer.ID, peerPubKey ed25519.PublicKey, streamNames []string) error
+// Handshake Completion (two-phase for race-free establishment)
+func (n *Node) PrepareStreams(peerID peer.ID, peerPubKey ed25519.PublicKey, streamNames []string) error  // Call on receiving PubKey
+func (n *Node) FinalizeHandshake(peerID peer.ID) error                                                   // Call on receiving Complete
+func (n *Node) CompleteHandshake(peerID peer.ID, peerPubKey ed25519.PublicKey, streamNames []string) error // Convenience: PrepareStreams + FinalizeHandshake
 
 // Messaging
 func (n *Node) Send(peerID peer.ID, streamName string, data []byte) error

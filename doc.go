@@ -53,11 +53,13 @@ Handle connection events (start handshake when connected):
 		}
 	}
 
-Handle handshake messages with event-driven flow:
+Handle handshake messages with two-phase completion:
 
 	// Receive Hello → Send PubKey
-	// Receive PubKey → Send Complete
-	// Receive Complete → CompleteHandshake()
+	// Receive PubKey → PrepareStreams() + Send Complete
+	// Receive Complete → FinalizeHandshake()
+
+	var streamsPrepared, gotComplete bool
 
 	for msg := range node.Messages() {
 		if msg.StreamName == streams.HandshakeStreamName {
@@ -66,9 +68,17 @@ Handle handshake messages with event-driven flow:
 				node.Send(msg.PeerID, streams.HandshakeStreamName, pubKeyMsg)
 			case MsgPubKey:
 				peerPubKey = extractPubKey(msg.Data)
+				// Prepare streams first (ready to receive encrypted messages)
+				node.PrepareStreams(msg.PeerID, peerPubKey, []string{"messages"})
+				streamsPrepared = true
+				// Signal readiness to peer
 				node.Send(msg.PeerID, streams.HandshakeStreamName, completeMsg)
 			case MsgComplete:
-				node.CompleteHandshake(msg.PeerID, peerPubKey, []string{"messages"})
+				gotComplete = true
+			}
+			// Finalize when both sides ready
+			if streamsPrepared && gotComplete {
+				node.FinalizeHandshake(msg.PeerID)
 			}
 		}
 	}
@@ -119,10 +129,10 @@ Glueberry Responsibilities:
  2. On success, StateConnected event fires, handshake stream ready, timeout starts
  3. Application reacts to StateConnected by sending Hello
  4. Receive Hello → Send PubKey
- 5. Receive PubKey → Send Complete
- 6. Receive Complete → Call CompleteHandshake() with peer's public key
+ 5. Receive PubKey → PrepareStreams() + Send Complete (ready for encrypted messages)
+ 6. Receive Complete → FinalizeHandshake() (both sides ready)
  7. State transitions to StateEstablished, timeout cancelled
- 8. Encrypted streams become available
+ 8. Encrypted streams active
 
 # Security
 
