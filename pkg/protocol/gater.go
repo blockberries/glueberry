@@ -13,15 +13,30 @@ type BlacklistChecker interface {
 	IsBlacklisted(peerID peer.ID) bool
 }
 
+// ConnectionStateChecker is an interface for checking if we're already
+// attempting to connect to a peer. Used for connection deduplication.
+type ConnectionStateChecker interface {
+	// IsConnecting returns true if we're currently attempting to connect
+	// to the peer (StateConnecting).
+	IsConnecting(peerID peer.ID) bool
+}
+
 // ConnectionGater implements libp2p's ConnectionGater interface to enforce
-// blacklisting at the connection level.
+// blacklisting and connection deduplication at the connection level.
 type ConnectionGater struct {
-	checker BlacklistChecker
+	checker      BlacklistChecker
+	stateChecker ConnectionStateChecker
 }
 
 // NewConnectionGater creates a new connection gater with the given blacklist checker.
 func NewConnectionGater(checker BlacklistChecker) *ConnectionGater {
 	return &ConnectionGater{checker: checker}
+}
+
+// SetStateChecker sets the connection state checker for deduplication.
+// This is set after construction to avoid circular dependencies.
+func (g *ConnectionGater) SetStateChecker(checker ConnectionStateChecker) {
+	g.stateChecker = checker
 }
 
 // InterceptPeerDial is called before dialing a peer.
@@ -43,9 +58,24 @@ func (g *ConnectionGater) InterceptAccept(addrs network.ConnMultiaddrs) bool {
 }
 
 // InterceptSecured is called after the security handshake completes
-// and the peer ID is known. Returns false to reject blacklisted peers.
+// and the peer ID is known. Returns false to reject blacklisted peers
+// or to deduplicate connections (reject incoming if we're already connecting outbound).
 func (g *ConnectionGater) InterceptSecured(dir network.Direction, p peer.ID, addrs network.ConnMultiaddrs) bool {
-	return !g.checker.IsBlacklisted(p)
+	// Always reject blacklisted peers
+	if g.checker.IsBlacklisted(p) {
+		return false
+	}
+
+	// Connection deduplication: if we receive an incoming connection from a peer
+	// we're already trying to connect to, reject it. First to complete wins.
+	if dir == network.DirInbound && g.stateChecker != nil {
+		if g.stateChecker.IsConnecting(p) {
+			// We're already dialing this peer - reject incoming, our outbound will complete first
+			return false
+		}
+	}
+
+	return true
 }
 
 // InterceptUpgraded is called after the connection is fully upgraded.

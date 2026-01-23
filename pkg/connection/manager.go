@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/blockberries/glueberry/pkg/addressbook"
-	"github.com/blockberries/glueberry/pkg/streams"
-	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -18,7 +16,6 @@ type HostConnector interface {
 	Connect(ctx context.Context, pi peer.AddrInfo) error
 	Disconnect(peerID peer.ID) error
 	IsConnected(peerID peer.ID) bool
-	NewHandshakeStream(ctx context.Context, peerID peer.ID) (network.Stream, error)
 }
 
 // EventEmitter defines the interface for emitting connection events.
@@ -81,19 +78,20 @@ func NewManager(
 	}
 }
 
-// Connect establishes a connection to a peer and opens a handshake stream.
-// Returns the handshake stream for the application to perform handshaking.
+// Connect establishes a connection to a peer.
+// The connection enters StateConnected when successful, and the app can then
+// send/receive handshake messages via Send()/Messages() on the "handshake" stream.
 //
-// The connection must complete the handshake (via EstablishEncryptedStreams)
+// The connection must complete the handshake (via CompleteHandshake)
 // within the configured HandshakeTimeout, or the connection will be dropped
 // and the peer will enter cooldown.
-func (m *Manager) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
+func (m *Manager) Connect(peerID peer.ID) error {
 	m.mu.Lock()
 
 	// Check if peer is blacklisted
 	if m.addressBook.IsBlacklisted(peerID) {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("peer %s is blacklisted", peerID)
+		return fmt.Errorf("peer %s is blacklisted", peerID)
 	}
 
 	// Check if already connected
@@ -101,7 +99,7 @@ func (m *Manager) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
 		state := conn.GetState()
 		if state.IsActive() {
 			m.mu.Unlock()
-			return nil, fmt.Errorf("already connected to peer %s (state: %s)", peerID, state)
+			return fmt.Errorf("already connected to peer %s (state: %s)", peerID, state)
 		}
 
 		// If in cooldown, check if cooldown expired
@@ -109,7 +107,7 @@ func (m *Manager) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
 			if conn.IsInCooldown() {
 				remaining := conn.CooldownRemaining()
 				m.mu.Unlock()
-				return nil, fmt.Errorf("peer %s is in cooldown for %v", peerID, remaining)
+				return fmt.Errorf("peer %s is in cooldown for %v", peerID, remaining)
 			}
 			// Cooldown expired, allow connection
 		}
@@ -119,7 +117,7 @@ func (m *Manager) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
 	peerEntry, err := m.addressBook.GetPeer(peerID)
 	if err != nil {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("peer %s not in address book: %w", peerID, err)
+		return fmt.Errorf("peer %s not in address book: %w", peerID, err)
 	}
 
 	// Create or get peer connection
@@ -132,7 +130,7 @@ func (m *Manager) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
 	// Transition to connecting
 	if err := conn.TransitionTo(StateConnecting); err != nil {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("cannot transition to connecting: %w", err)
+		return fmt.Errorf("cannot transition to connecting: %w", err)
 	}
 
 	m.mu.Unlock()
@@ -152,15 +150,18 @@ func (m *Manager) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
 
 	if err := m.host.Connect(connectCtx, addrInfo); err != nil {
 		m.handleConnectFailure(peerID, err)
-		return nil, fmt.Errorf("failed to connect to peer %s: %w", peerID, err)
+		return fmt.Errorf("failed to connect to peer %s: %w", peerID, err)
 	}
 
 	// Update state to connected
 	m.mu.Lock()
 	if err := conn.TransitionTo(StateConnected); err != nil {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("cannot transition to connected: %w", err)
+		return fmt.Errorf("cannot transition to connected: %w", err)
 	}
+
+	// Set up handshake timeout enforcement (starts at StateConnected)
+	m.setupHandshakeTimeout(conn)
 	m.mu.Unlock()
 
 	m.emitEvent(peerID, StateConnected, nil)
@@ -168,34 +169,7 @@ func (m *Manager) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
 	// Update last seen (ignore error - not critical)
 	_ = m.addressBook.UpdateLastSeen(peerID)
 
-	// Open handshake stream
-	streamCtx, streamCancel := context.WithTimeout(m.ctx, 10*time.Second)
-	defer streamCancel()
-
-	rawStream, err := m.host.NewHandshakeStream(streamCtx, peerID)
-	if err != nil {
-		m.handleConnectFailure(peerID, err)
-		return nil, fmt.Errorf("failed to open handshake stream: %w", err)
-	}
-
-	// Wrap in HandshakeStream
-	handshakeStream := streams.NewHandshakeStream(rawStream, m.config.HandshakeTimeout)
-
-	// Set up handshake timeout enforcement
-	m.setupHandshakeTimeout(conn)
-
-	// Set the handshake stream
-	m.mu.Lock()
-	if err := conn.SetHandshakeStream(handshakeStream); err != nil {
-		m.mu.Unlock()
-		handshakeStream.Close()
-		return nil, fmt.Errorf("cannot set handshake stream: %w", err)
-	}
-	m.mu.Unlock()
-
-	m.emitEvent(peerID, StateHandshaking, nil)
-
-	return handshakeStream, nil
+	return nil
 }
 
 // Disconnect closes the connection to a peer and cleans up resources.
@@ -245,6 +219,12 @@ func (m *Manager) GetState(peerID peer.ID) ConnectionState {
 	return StateDisconnected
 }
 
+// IsConnecting returns true if we're currently attempting to connect to the peer.
+// This is used by the connection gater for connection deduplication.
+func (m *Manager) IsConnecting(peerID peer.ID) bool {
+	return m.GetState(peerID) == StateConnecting
+}
+
 // CancelReconnection cancels any ongoing reconnection attempts for a peer.
 func (m *Manager) CancelReconnection(peerID peer.ID) error {
 	m.mu.Lock()
@@ -271,7 +251,6 @@ func (m *Manager) CancelReconnection(peerID peer.ID) error {
 // setupHandshakeTimeout sets up a timer to enforce handshake timeout.
 func (m *Manager) setupHandshakeTimeout(conn *PeerConnection) {
 	timeoutCtx, cancel := context.WithCancel(m.ctx)
-	conn.HandshakeCancel = cancel
 
 	timer := time.AfterFunc(m.config.HandshakeTimeout, func() {
 		select {
@@ -284,7 +263,11 @@ func (m *Manager) setupHandshakeTimeout(conn *PeerConnection) {
 		}
 	})
 
+	// Set fields under connection lock to avoid race with CancelHandshakeTimeout
+	conn.mu.Lock()
+	conn.HandshakeCancel = cancel
 	conn.HandshakeTimer = timer
+	conn.mu.Unlock()
 }
 
 // handleHandshakeTimeout handles a handshake timeout.
@@ -296,16 +279,16 @@ func (m *Manager) handleHandshakeTimeout(peerID peer.ID) {
 		return
 	}
 
-	// Only handle if still in handshaking state
-	if conn.GetState() != StateHandshaking {
+	// Only handle if still in connected state (waiting for handshake to complete)
+	if conn.GetState() != StateConnected {
 		m.mu.Unlock()
 		return
 	}
 
 	m.mu.Unlock()
 
-	// Close handshake stream
-	_ = conn.ClearHandshakeStream() // Ignore error - we're cleaning up
+	// Cancel handshake timeout resources
+	conn.CancelHandshakeTimeout()
 
 	// Disconnect the peer
 	_ = m.host.Disconnect(peerID) // Ignore error - best effort disconnect
@@ -594,8 +577,8 @@ func (m *Manager) MarkEstablished(peerID peer.ID) error {
 		return fmt.Errorf("peer %s not connected", peerID)
 	}
 
-	// Clear handshake resources
-	_ = conn.ClearHandshakeStream() // Ignore error - cleanup
+	// Cancel handshake timeout
+	conn.CancelHandshakeTimeout()
 
 	// Transition to established
 	m.mu.Lock()
@@ -623,21 +606,54 @@ func (m *Manager) GetOrCreateConnection(peerID peer.ID) *PeerConnection {
 	return conn
 }
 
-// RegisterIncomingConnection registers an incoming connection and transitions through states.
-// This should be called when handling an incoming handshake before EstablishEncryptedStreams.
+// RegisterIncomingConnection registers an incoming connection and transitions to StateConnected.
+// This should be called when a new incoming connection is established.
+// It also starts the handshake timeout.
 func (m *Manager) RegisterIncomingConnection(peerID peer.ID) error {
 	conn := m.GetOrCreateConnection(peerID)
 
-	// Transition through states to reach Handshaking
-	// This mimics the outgoing connection flow
+	// Transition through states to reach Connected
 	state := conn.GetState()
 
 	if state == StateDisconnected {
 		_ = conn.TransitionTo(StateConnecting)
 		_ = conn.TransitionTo(StateConnected)
-		_ = conn.TransitionTo(StateHandshaking)
-		m.emitEvent(peerID, StateHandshaking, nil)
+
+		// Start handshake timeout for incoming connection
+		m.setupHandshakeTimeout(conn)
+
+		m.emitEvent(peerID, StateConnected, nil)
 	}
 
+	return nil
+}
+
+// AutoConnect attempts to connect to a peer if not already connected.
+// This is used for automatic connection on AddPeer and Start.
+// It does not return errors - connection failures are handled via events.
+func (m *Manager) AutoConnect(peerID peer.ID) {
+	state := m.GetState(peerID)
+	if state.IsActive() {
+		return // Already connected or connecting
+	}
+
+	// Attempt connection in background
+	go func() {
+		_ = m.Connect(peerID) // Errors handled via events
+	}()
+}
+
+// CancelHandshakeTimeout cancels the handshake timeout for a peer.
+// This is called when CompleteHandshake is invoked.
+func (m *Manager) CancelHandshakeTimeout(peerID peer.ID) error {
+	m.mu.RLock()
+	conn, exists := m.connections[peerID]
+	m.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("peer %s not connected", peerID)
+	}
+
+	conn.CancelHandshakeTimeout()
 	return nil
 }

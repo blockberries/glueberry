@@ -129,85 +129,31 @@ func (m *mockStreamWithConn) Conn() network.Conn {
 	return &mockConnForHandlers{remotePeer: m.remotePeer}
 }
 
-func TestHandshakeHandler_HandleStream(t *testing.T) {
-	incoming := make(chan IncomingHandshake, 10)
-	handler := NewHandshakeHandler(30*time.Second, incoming)
+func TestStreamHandler_HandleStream(t *testing.T) {
+	// StreamHandler is deprecated but we test it doesn't panic
+	handler := NewStreamHandler(nil)
 
 	peerID := mustParsePeerID(t, "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N")
 
 	var buf bytes.Buffer
 	stream := newMockStreamWithConn(&buf, &buf, peerID)
 
-	// Handle the stream
-	handler.HandleStream(stream)
+	// Get the handler function
+	handlerFn := handler.HandleStream("test")
 
-	// Should receive incoming handshake
-	select {
-	case hs := <-incoming:
-		if hs.PeerID != peerID {
-			t.Errorf("PeerID = %v, want %v", hs.PeerID, peerID)
-		}
-		if hs.HandshakeStream == nil {
-			t.Error("HandshakeStream should not be nil")
-		}
-		if hs.Timestamp.IsZero() {
-			t.Error("Timestamp should be set")
-		}
+	// Should not panic
+	handlerFn(stream)
 
-		// Clean up
-		hs.HandshakeStream.Close()
-	case <-time.After(1 * time.Second):
-		t.Fatal("timeout waiting for incoming handshake")
+	// Stream should be reset (handler is deprecated)
+	if !stream.closed {
+		t.Error("stream should be closed/reset by deprecated handler")
 	}
 }
 
-func TestHandshakeHandler_HandleStream_FullChannel(t *testing.T) {
-	incoming := make(chan IncomingHandshake, 1)
-	handler := NewHandshakeHandler(30*time.Second, incoming)
-
-	peerID1 := mustParsePeerID(t, "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N")
-	peerID2 := mustParsePeerID(t, "QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt")
-
-	var buf1, buf2 bytes.Buffer
-	stream1 := newMockStreamWithConn(&buf1, &buf1, peerID1)
-	stream2 := newMockStreamWithConn(&buf2, &buf2, peerID2)
-
-	// Fill the channel
-	handler.HandleStream(stream1)
-
-	// Second handle should drop (channel full)
-	handler.HandleStream(stream2)
-
-	// Should only receive the first one
-	select {
-	case hs := <-incoming:
-		if hs.PeerID != peerID1 {
-			t.Error("should receive first handshake")
-		}
-		hs.HandshakeStream.Close()
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("should receive first handshake")
-	}
-
-	// Second should not be in channel
-	select {
-	case <-incoming:
-		t.Error("should not receive second handshake (dropped)")
-	case <-time.After(50 * time.Millisecond):
-		// Expected - second was dropped
-	}
-
-	// Second stream should be closed
-	if !stream2.closed {
-		t.Error("dropped stream should be closed")
-	}
-}
-
-func TestNewHandshakeHandler(t *testing.T) {
-	incoming := make(chan IncomingHandshake, 10)
-	handler := NewHandshakeHandler(30*time.Second, incoming)
+func TestNewStreamHandler(t *testing.T) {
+	handler := NewStreamHandler(nil)
 
 	if handler == nil {
-		t.Fatal("NewHandshakeHandler returned nil")
+		t.Fatal("NewStreamHandler returned nil")
 	}
 }

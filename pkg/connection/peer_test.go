@@ -117,8 +117,8 @@ func TestPeerConnection_StartCooldown(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerID)
 	conn := NewPeerConnection(peerID)
 
-	// Must be in a state that can transition to cooldown
-	conn.State = StateHandshaking
+	// Must be in a state that can transition to cooldown (StateConnected)
+	conn.State = StateConnected
 
 	duration := 1 * time.Minute
 	err := conn.StartCooldown(duration)
@@ -144,7 +144,7 @@ func TestPeerConnection_IsInCooldown_Expired(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerID)
 	conn := NewPeerConnection(peerID)
 
-	conn.State = StateHandshaking
+	conn.State = StateConnected
 	conn.StartCooldown(10 * time.Millisecond)
 
 	// Wait for cooldown to expire

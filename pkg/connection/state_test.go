@@ -12,7 +12,6 @@ func TestConnectionState_String(t *testing.T) {
 		{StateDisconnected, "Disconnected"},
 		{StateConnecting, "Connecting"},
 		{StateConnected, "Connected"},
-		{StateHandshaking, "Handshaking"},
 		{StateEstablished, "Established"},
 		{StateReconnecting, "Reconnecting"},
 		{StateCooldown, "Cooldown"},
@@ -37,7 +36,6 @@ func TestConnectionState_IsTerminal(t *testing.T) {
 		{StateDisconnected, true},
 		{StateConnecting, false},
 		{StateConnected, false},
-		{StateHandshaking, false},
 		{StateEstablished, false},
 		{StateReconnecting, false},
 		{StateCooldown, true},
@@ -61,7 +59,6 @@ func TestConnectionState_IsActive(t *testing.T) {
 		{StateDisconnected, false},
 		{StateConnecting, true},
 		{StateConnected, true},
-		{StateHandshaking, true},
 		{StateEstablished, true},
 		{StateReconnecting, false},
 		{StateCooldown, false},
@@ -88,27 +85,22 @@ func TestConnectionState_CanTransitionTo(t *testing.T) {
 		{"disconnected -> connecting", StateDisconnected, StateConnecting, true},
 		{"disconnected -> reconnecting", StateDisconnected, StateReconnecting, true},
 		{"disconnected -> connected", StateDisconnected, StateConnected, false},
-		{"disconnected -> handshaking", StateDisconnected, StateHandshaking, false},
+		{"disconnected -> established", StateDisconnected, StateEstablished, false},
 
 		// From Connecting
 		{"connecting -> connected", StateConnecting, StateConnected, true},
 		{"connecting -> disconnected", StateConnecting, StateDisconnected, true},
-		{"connecting -> handshaking", StateConnecting, StateHandshaking, false},
+		{"connecting -> established", StateConnecting, StateEstablished, false},
 
-		// From Connected
-		{"connected -> handshaking", StateConnected, StateHandshaking, true},
+		// From Connected (new: can go directly to Established or Cooldown)
+		{"connected -> established", StateConnected, StateEstablished, true},
 		{"connected -> disconnected", StateConnected, StateDisconnected, true},
-		{"connected -> established", StateConnected, StateEstablished, false},
-
-		// From Handshaking
-		{"handshaking -> established", StateHandshaking, StateEstablished, true},
-		{"handshaking -> disconnected", StateHandshaking, StateDisconnected, true},
-		{"handshaking -> cooldown", StateHandshaking, StateCooldown, true},
-		{"handshaking -> connecting", StateHandshaking, StateConnecting, false},
+		{"connected -> cooldown", StateConnected, StateCooldown, true},
+		{"connected -> connecting", StateConnected, StateConnecting, false},
 
 		// From Established
 		{"established -> disconnected", StateEstablished, StateDisconnected, true},
-		{"established -> handshaking", StateEstablished, StateHandshaking, false},
+		{"established -> connecting", StateEstablished, StateConnecting, false},
 
 		// From Reconnecting
 		{"reconnecting -> connecting", StateReconnecting, StateConnecting, true},
@@ -139,8 +131,7 @@ func TestConnectionState_ValidateTransition(t *testing.T) {
 	}{
 		{StateDisconnected, StateConnecting},
 		{StateConnecting, StateConnected},
-		{StateConnected, StateHandshaking},
-		{StateHandshaking, StateEstablished},
+		{StateConnected, StateEstablished},
 		{StateEstablished, StateDisconnected},
 	}
 
@@ -158,7 +149,7 @@ func TestConnectionState_ValidateTransition(t *testing.T) {
 		from ConnectionState
 		to   ConnectionState
 	}{
-		{StateDisconnected, StateHandshaking},
+		{StateDisconnected, StateEstablished},
 		{StateConnecting, StateEstablished},
 		{StateEstablished, StateConnecting},
 		{StateCooldown, StateConnecting},

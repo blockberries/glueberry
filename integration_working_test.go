@@ -3,32 +3,103 @@ package glueberry
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blockberries/cramberry/pkg/cramberry"
+	"github.com/blockberries/glueberry/pkg/streams"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 )
 
-// Working integration test demonstrating real-world usage
-// This test shows unidirectional messaging (node1 -> node2)
-// Bidirectional messaging would require both nodes to call EstablishEncryptedStreams
-// sequentially with proper synchronization
+// Integration test demonstrating the symmetric, event-driven API
+// using Cramberry polymorphic messages for the handshake protocol.
 
-type Handshake struct {
-	PublicKey []byte `cramberry:"1,required"`
+// HandshakeMessage is the interface for all handshake message types.
+// Cramberry uses TypeIDs to distinguish between concrete implementations.
+type HandshakeMessage interface {
+	isHandshakeMessage()
 }
 
-func TestIntegration_UnidirectionalMessaging(t *testing.T) {
+// HelloMessage is sent to initiate a handshake.
+type HelloMessage struct {
+	Version uint32 `cramberry:"1"`
+}
+
+func (HelloMessage) isHandshakeMessage() {}
+
+// PubKeyMessage contains the sender's Ed25519 public key.
+type PubKeyMessage struct {
+	PublicKey []byte `cramberry:"1"`
+}
+
+func (PubKeyMessage) isHandshakeMessage() {}
+
+// CompleteMessage signals handshake completion.
+type CompleteMessage struct {
+	Success bool `cramberry:"1"`
+}
+
+func (CompleteMessage) isHandshakeMessage() {}
+
+// HandshakeEnvelope wraps a HandshakeMessage for polymorphic serialization.
+type HandshakeEnvelope struct {
+	Message HandshakeMessage `cramberry:"1"`
+}
+
+// Type IDs for handshake messages (in user range: 128+)
+const (
+	typeIDHelloMessage    cramberry.TypeID = 128
+	typeIDPubKeyMessage   cramberry.TypeID = 129
+	typeIDCompleteMessage cramberry.TypeID = 130
+)
+
+// registerHandshakeTypes registers all handshake message types with Cramberry.
+// This must be called before marshaling/unmarshaling handshake messages.
+func registerHandshakeTypes() {
+	// Clear any previous registrations (useful for tests)
+	cramberry.DefaultRegistry.Clear()
+
+	// Register concrete types with specific TypeIDs
+	cramberry.MustRegisterWithID[HelloMessage](typeIDHelloMessage)
+	cramberry.MustRegisterWithID[PubKeyMessage](typeIDPubKeyMessage)
+	cramberry.MustRegisterWithID[CompleteMessage](typeIDCompleteMessage)
+}
+
+// marshalHandshakeMsg serializes a handshake message using Cramberry.
+func marshalHandshakeMsg(msg HandshakeMessage) ([]byte, error) {
+	envelope := HandshakeEnvelope{Message: msg}
+	return cramberry.Marshal(envelope)
+}
+
+// unmarshalHandshakeMsg deserializes a handshake message using Cramberry.
+func unmarshalHandshakeMsg(data []byte) (HandshakeMessage, error) {
+	var envelope HandshakeEnvelope
+	if err := cramberry.Unmarshal(data, &envelope); err != nil {
+		return nil, fmt.Errorf("unmarshal handshake message: %w", err)
+	}
+	if envelope.Message == nil {
+		return nil, fmt.Errorf("nil handshake message")
+	}
+	return envelope.Message, nil
+}
+
+func TestIntegration_SymmetricHandshake(t *testing.T) {
+	// Register Cramberry types for polymorphic handshake messages
+	registerHandshakeTypes()
+
 	// Create two nodes
 	_, priv1, _ := ed25519.GenerateKey(rand.Reader)
 	_, priv2, _ := ed25519.GenerateKey(rand.Reader)
 	pub1 := priv1.Public().(ed25519.PublicKey)
 	pub2 := priv2.Public().(ed25519.PublicKey)
 
-	dir1 := filepath.Join(os.TempDir(), "glueberry-node1-"+time.Now().Format("20060102150405"))
-	dir2 := filepath.Join(os.TempDir(), "glueberry-node2-"+time.Now().Format("20060102150405"))
+	dir1 := filepath.Join(os.TempDir(), "glueberry-node1-"+randomSuffix())
+	dir2 := filepath.Join(os.TempDir(), "glueberry-node2-"+randomSuffix())
 	defer os.RemoveAll(dir1)
 	defer os.RemoveAll(dir2)
 
@@ -37,123 +108,633 @@ func TestIntegration_UnidirectionalMessaging(t *testing.T) {
 	cfg1 := NewConfig(priv1, filepath.Join(dir1, "ab.json"), []multiaddr.Multiaddr{listenAddr})
 	cfg2 := NewConfig(priv2, filepath.Join(dir2, "ab.json"), []multiaddr.Multiaddr{listenAddr})
 
-	node1, _ := New(cfg1)
-	node2, _ := New(cfg2)
+	cfg1.HandshakeTimeout = 30 * time.Second
+	cfg2.HandshakeTimeout = 30 * time.Second
 
-	node1.Start()
-	node2.Start()
+	node1, err := New(cfg1)
+	if err != nil {
+		t.Fatalf("Failed to create node1: %v", err)
+	}
+	node2, err := New(cfg2)
+	if err != nil {
+		t.Fatalf("Failed to create node2: %v", err)
+	}
+
+	if err := node1.Start(); err != nil {
+		t.Fatalf("Failed to start node1: %v", err)
+	}
+	if err := node2.Start(); err != nil {
+		t.Fatalf("Failed to start node2: %v", err)
+	}
 	defer node1.Stop()
 	defer node2.Stop()
 
 	t.Logf("Node1: %s", node1.PeerID())
 	t.Logf("Node2: %s", node2.PeerID())
 
-	// Add peers
-	node1.AddPeer(node2.PeerID(), node2.Addrs(), nil)
-	node2.AddPeer(node1.PeerID(), node1.Addrs(), nil)
+	// Channels for handshake completion signaling
+	node1Done := make(chan struct{})
+	node2Done := make(chan struct{})
+	errChan := make(chan error, 8)
 
-	// Handle incoming handshake on node2
-	handshakeDone := make(chan bool)
+	// sendHello sends a Hello message - called on StateConnected
+	sendHello := func(node *Node, peerID peer.ID, name string) error {
+		helloMsg := HelloMessage{Version: 1}
+		data, err := marshalHandshakeMsg(helloMsg)
+		if err != nil {
+			return fmt.Errorf("marshal Hello: %w", err)
+		}
+		if err := node.Send(peerID, streams.HandshakeStreamName, data); err != nil {
+			return fmt.Errorf("send Hello: %w", err)
+		}
+		t.Logf("[%s] Sent HelloMessage", name)
+		return nil
+	}
+
+	// Node1's event handler: StateConnected → Send Hello
 	go func() {
-		incoming := <-node2.IncomingHandshakes()
-		t.Logf("✅ Node2 received incoming handshake")
-
-		// Receive public key
-		var hs Handshake
-		incoming.HandshakeStream.Receive(&hs)
-
-		// Send our public key
-		incoming.HandshakeStream.Send(&Handshake{PublicKey: pub2})
-
-		// Establish encrypted streams (registers handlers for incoming from node1)
-		node2.EstablishEncryptedStreams(incoming.PeerID, pub1, []string{"messages"})
-
-		t.Log("✅ Node2 ready to receive")
-		handshakeDone <- true
+		for event := range node1.Events() {
+			t.Logf("[node1] Event: %s for peer %s", event.State, event.PeerID.String()[:8])
+			if event.State == StateConnected && event.PeerID == node2.PeerID() {
+				if err := sendHello(node1, node2.PeerID(), "node1"); err != nil {
+					errChan <- err
+					return
+				}
+			}
+		}
 	}()
 
-	// Node1 connects and performs handshake
+	// Node2's event handler: StateConnected → Send Hello
+	go func() {
+		for event := range node2.Events() {
+			t.Logf("[node2] Event: %s for peer %s", event.State, event.PeerID.String()[:8])
+			if event.State == StateConnected && event.PeerID == node1.PeerID() {
+				if err := sendHello(node2, node1.PeerID(), "node2"); err != nil {
+					errChan <- err
+					return
+				}
+			}
+		}
+	}()
+
+	// Node1's message handler - symmetric handshake protocol:
+	// Receive Hello → Send PubKey
+	// Receive PubKey → Send Complete
+	// Receive Complete (and have PubKey) → CompleteHandshake
+	go func() {
+		var peerPubKey ed25519.PublicKey
+		var gotPubKey, gotComplete bool
+
+		for msg := range node1.Messages() {
+			if msg.StreamName != streams.HandshakeStreamName {
+				continue
+			}
+
+			hsMsg, err := unmarshalHandshakeMsg(msg.Data)
+			if err != nil {
+				t.Logf("[node1] Failed to unmarshal: %v", err)
+				continue
+			}
+
+			switch m := hsMsg.(type) {
+			case *HelloMessage:
+				t.Logf("[node1] Received HelloMessage (version=%d)", m.Version)
+				// Receive Hello → Send PubKey
+				pubKeyMsg := PubKeyMessage{PublicKey: pub1}
+				data, _ := marshalHandshakeMsg(pubKeyMsg)
+				if err := node1.Send(node2.PeerID(), streams.HandshakeStreamName, data); err != nil {
+					errChan <- err
+					return
+				}
+				t.Log("[node1] Sent PubKeyMessage")
+
+			case *PubKeyMessage:
+				t.Log("[node1] Received PubKeyMessage")
+				peerPubKey = ed25519.PublicKey(m.PublicKey)
+				gotPubKey = true
+				// Receive PubKey → Send Complete
+				completeMsg := CompleteMessage{Success: true}
+				data, _ := marshalHandshakeMsg(completeMsg)
+				if err := node1.Send(node2.PeerID(), streams.HandshakeStreamName, data); err != nil {
+					errChan <- err
+					return
+				}
+				t.Log("[node1] Sent CompleteMessage")
+
+			case *CompleteMessage:
+				t.Logf("[node1] Received CompleteMessage (success=%v)", m.Success)
+				gotComplete = true
+			}
+
+			// Receive Complete (and have PubKey) → CompleteHandshake
+			if gotPubKey && gotComplete {
+				if err := node1.CompleteHandshake(node2.PeerID(), peerPubKey, []string{"messages"}); err != nil {
+					errChan <- err
+					return
+				}
+				t.Log("[node1] Handshake complete!")
+				close(node1Done)
+				return
+			}
+		}
+	}()
+
+	// Node2's message handler - identical to Node1 (true symmetry)
+	go func() {
+		var peerPubKey ed25519.PublicKey
+		var gotPubKey, gotComplete bool
+
+		for msg := range node2.Messages() {
+			if msg.StreamName != streams.HandshakeStreamName {
+				continue
+			}
+
+			hsMsg, err := unmarshalHandshakeMsg(msg.Data)
+			if err != nil {
+				t.Logf("[node2] Failed to unmarshal: %v", err)
+				continue
+			}
+
+			switch m := hsMsg.(type) {
+			case *HelloMessage:
+				t.Logf("[node2] Received HelloMessage (version=%d)", m.Version)
+				// Receive Hello → Send PubKey
+				pubKeyMsg := PubKeyMessage{PublicKey: pub2}
+				data, _ := marshalHandshakeMsg(pubKeyMsg)
+				if err := node2.Send(node1.PeerID(), streams.HandshakeStreamName, data); err != nil {
+					errChan <- err
+					return
+				}
+				t.Log("[node2] Sent PubKeyMessage")
+
+			case *PubKeyMessage:
+				t.Log("[node2] Received PubKeyMessage")
+				peerPubKey = ed25519.PublicKey(m.PublicKey)
+				gotPubKey = true
+				// Receive PubKey → Send Complete
+				completeMsg := CompleteMessage{Success: true}
+				data, _ := marshalHandshakeMsg(completeMsg)
+				if err := node2.Send(node1.PeerID(), streams.HandshakeStreamName, data); err != nil {
+					errChan <- err
+					return
+				}
+				t.Log("[node2] Sent CompleteMessage")
+
+			case *CompleteMessage:
+				t.Logf("[node2] Received CompleteMessage (success=%v)", m.Success)
+				gotComplete = true
+			}
+
+			// Receive Complete (and have PubKey) → CompleteHandshake
+			if gotPubKey && gotComplete {
+				if err := node2.CompleteHandshake(node1.PeerID(), peerPubKey, []string{"messages"}); err != nil {
+					errChan <- err
+					return
+				}
+				t.Log("[node2] Handshake complete!")
+				close(node2Done)
+				return
+			}
+		}
+	}()
+
+	// Add node2 to node1's address book and initiate connection
+	// Note: AddPeer may trigger auto-connect, so Connect() may return "already connecting"
+	node1.AddPeer(node2.PeerID(), node2.Addrs(), nil)
+
 	t.Log("Node1 connecting...")
-	hs, _ := node1.Connect(node2.PeerID())
+	if err := node1.Connect(node2.PeerID()); err != nil {
+		// Ignore "already connected" errors - auto-connect may have started
+		if !strings.Contains(err.Error(), "already connected") {
+			t.Fatalf("Connect failed: %v", err)
+		}
+		t.Logf("Connect returned (already connecting): %v", err)
+	}
+	t.Log("Node1 connect initiated - waiting for StateConnected events to trigger handshake")
 
-	// Send public key
-	hs.Send(&Handshake{PublicKey: pub1})
-
-	// Receive node2's public key
-	var response Handshake
-	hs.Receive(&response)
-
-	t.Log("✅ Node1 handshake complete")
-
-	// Wait for node2 to be ready
-	<-handshakeDone
-
-	// With lazy stream opening, BOTH nodes can call EstablishEncryptedStreams
-	// in ANY order - no synchronization required!
-	t.Log("Both nodes establishing encrypted streams (can be in any order)...")
-
-	// Node1 establishes (registers handlers)
-	if err := node1.EstablishEncryptedStreams(node2.PeerID(), pub2, []string{"messages"}); err != nil {
-		t.Fatalf("Node1 EstablishEncryptedStreams failed: %v", err)
+	// Wait for handshakes to complete
+	timeout := time.After(10 * time.Second)
+	select {
+	case <-node1Done:
+	case err := <-errChan:
+		t.Fatalf("Node1 handshake error: %v", err)
+	case <-timeout:
+		t.Fatal("Timeout waiting for node1 handshake")
 	}
 
-	// Node2 establishes (registers handlers)
-	if err := node2.EstablishEncryptedStreams(node1.PeerID(), pub1, []string{"messages"}); err != nil {
-		t.Fatalf("Node2 EstablishEncryptedStreams failed: %v", err)
+	select {
+	case <-node2Done:
+	case err := <-errChan:
+		t.Fatalf("Node2 handshake error: %v", err)
+	case <-timeout:
+		t.Fatal("Timeout waiting for node2 handshake")
 	}
 
-	t.Log("✅ Both nodes ready (streams will open lazily on first Send)")
+	t.Log("Both handshakes completed!")
 
-	// Give time for handlers to register
-	time.Sleep(200 * time.Millisecond)
+	// Verify states
+	time.Sleep(100 * time.Millisecond)
+	state1 := node1.ConnectionState(node2.PeerID())
+	state2 := node2.ConnectionState(node1.PeerID())
+	t.Logf("Node1 -> Node2: %v", state1)
+	t.Logf("Node2 -> Node1: %v", state2)
 
-	// Check states
-	t.Logf("Node1 state: %v", node1.ConnectionState(node2.PeerID()))
-	t.Logf("Node2 state: %v", node2.ConnectionState(node1.PeerID()))
-
-	// Test bidirectional messaging - both nodes can send to each other
-	// Streams open lazily on first Send()
-
-	// Node1 → Node2
-	msg1to2 := []byte("Hello from Node1!")
-	t.Log("Node1 sending to Node2 (stream will open lazily)...")
-	if err := node1.Send(node2.PeerID(), "messages", msg1to2); err != nil {
-		t.Fatalf("Node1 Send failed: %v", err)
+	if state1 != StateEstablished {
+		t.Errorf("Node1 state: %v, want Established", state1)
 	}
-	t.Log("✅ Node1 sent (stream opened lazily)")
+	if state2 != StateEstablished {
+		t.Errorf("Node2 state: %v, want Established", state2)
+	}
 
-	// Node2 receives
+	// Test encrypted messaging
+	t.Log("Testing encrypted messaging...")
+
+	// Node1 sends to Node2
+	msg1 := []byte("Hello from Node1!")
+	if err := node1.Send(node2.PeerID(), "messages", msg1); err != nil {
+		t.Fatalf("Send from node1 failed: %v", err)
+	}
+
 	select {
 	case msg := <-node2.Messages():
-		t.Logf("✅ Node2 received: %s", string(msg.Data))
-		if string(msg.Data) != string(msg1to2) {
-			t.Errorf("Message mismatch")
+		if msg.StreamName != "messages" {
+			t.Errorf("Expected stream 'messages', got %q", msg.StreamName)
 		}
+		if string(msg.Data) != string(msg1) {
+			t.Errorf("Node2 got %q, want %q", msg.Data, msg1)
+		}
+		t.Logf("Node2 received: %s", msg.Data)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Timeout waiting for message on node2")
 	}
 
-	// Node2 → Node1 (demonstrates symmetry)
-	msg2to1 := []byte("Hello back from Node2!")
-	t.Log("Node2 sending to Node1 (stream will open lazily)...")
-	if err := node2.Send(node1.PeerID(), "messages", msg2to1); err != nil {
-		t.Fatalf("Node2 Send failed: %v", err)
+	// Node2 sends to Node1
+	msg2 := []byte("Reply from Node2!")
+	if err := node2.Send(node1.PeerID(), "messages", msg2); err != nil {
+		t.Fatalf("Send from node2 failed: %v", err)
 	}
-	t.Log("✅ Node2 sent (stream opened lazily)")
 
-	// Node1 receives
 	select {
 	case msg := <-node1.Messages():
-		t.Logf("✅ Node1 received: %s", string(msg.Data))
-		if string(msg.Data) != string(msg2to1) {
-			t.Errorf("Message mismatch")
+		if msg.StreamName != "messages" {
+			t.Errorf("Expected stream 'messages', got %q", msg.StreamName)
 		}
+		if string(msg.Data) != string(msg2) {
+			t.Errorf("Node1 got %q, want %q", msg.Data, msg2)
+		}
+		t.Logf("Node1 received: %s", msg.Data)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Timeout waiting for message on node1")
 	}
 
-	t.Log("✅✅✅ INTEGRATION TEST PASSED!")
-	t.Log("  - Symmetric API: Both nodes called EstablishEncryptedStreams in any order")
-	t.Log("  - Lazy stream opening: Streams created on first Send()")
-	t.Log("  - Bidirectional messaging: Both nodes sent and received encrypted messages")
+	t.Log("SUCCESS!")
+}
+
+func TestIntegration_HandshakeTimeout(t *testing.T) {
+	// Register Cramberry types for polymorphic handshake messages
+	registerHandshakeTypes()
+
+	// Create two nodes with SHORT handshake timeout
+	_, priv1, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv2, _ := ed25519.GenerateKey(rand.Reader)
+	pub1 := priv1.Public().(ed25519.PublicKey)
+
+	dir1 := filepath.Join(os.TempDir(), "glueberry-timeout-node1-"+randomSuffix())
+	dir2 := filepath.Join(os.TempDir(), "glueberry-timeout-node2-"+randomSuffix())
+	defer os.RemoveAll(dir1)
+	defer os.RemoveAll(dir2)
+
+	listenAddr, _ := multiaddr.NewMultiaddr("/ip4/127.0.0.1/tcp/0")
+
+	cfg1 := NewConfig(priv1, filepath.Join(dir1, "ab.json"), []multiaddr.Multiaddr{listenAddr})
+	cfg2 := NewConfig(priv2, filepath.Join(dir2, "ab.json"), []multiaddr.Multiaddr{listenAddr})
+
+	// Set SHORT handshake timeout for testing
+	cfg1.HandshakeTimeout = 500 * time.Millisecond
+	cfg2.HandshakeTimeout = 500 * time.Millisecond
+
+	node1, err := New(cfg1)
+	if err != nil {
+		t.Fatalf("Failed to create node1: %v", err)
+	}
+	node2, err := New(cfg2)
+	if err != nil {
+		t.Fatalf("Failed to create node2: %v", err)
+	}
+
+	if err := node1.Start(); err != nil {
+		t.Fatalf("Failed to start node1: %v", err)
+	}
+	if err := node2.Start(); err != nil {
+		t.Fatalf("Failed to start node2: %v", err)
+	}
+	defer node1.Stop()
+	defer node2.Stop()
+
+	t.Logf("Node1: %s", node1.PeerID())
+	t.Logf("Node2: %s", node2.PeerID())
+
+	// Channel to capture timeout/cooldown event
+	timeoutDetected := make(chan struct{})
+	errChan := make(chan error, 4)
+
+	// Node1's event handler: StateConnected → Send Hello, watch for Cooldown
+	go func() {
+		for event := range node1.Events() {
+			t.Logf("[node1] Event: %s for peer %s", event.State, event.PeerID.String()[:8])
+			if event.State == StateConnected && event.PeerID == node2.PeerID() {
+				// Send Hello to start handshake
+				helloMsg := HelloMessage{Version: 1}
+				data, _ := marshalHandshakeMsg(helloMsg)
+				if err := node1.Send(node2.PeerID(), streams.HandshakeStreamName, data); err != nil {
+					errChan <- err
+					return
+				}
+				t.Log("[node1] Sent HelloMessage")
+			}
+			if event.State == StateCooldown && event.PeerID == node2.PeerID() {
+				t.Logf("[node1] Detected cooldown (timeout): %v", event.Error)
+				close(timeoutDetected)
+				return
+			}
+		}
+	}()
+
+	// Node2's event handler: StateConnected → Send Hello, but then STALL (don't complete handshake)
+	go func() {
+		for event := range node2.Events() {
+			t.Logf("[node2] Event: %s for peer %s", event.State, event.PeerID.String()[:8])
+			if event.State == StateConnected && event.PeerID == node1.PeerID() {
+				// Send Hello to start handshake
+				helloMsg := HelloMessage{Version: 1}
+				data, _ := marshalHandshakeMsg(helloMsg)
+				if err := node2.Send(node1.PeerID(), streams.HandshakeStreamName, data); err != nil {
+					errChan <- err
+					return
+				}
+				t.Log("[node2] Sent HelloMessage")
+			}
+		}
+	}()
+
+	// Node1's message handler: normal handshake flow
+	go func() {
+		for msg := range node1.Messages() {
+			if msg.StreamName != streams.HandshakeStreamName {
+				continue
+			}
+
+			hsMsg, err := unmarshalHandshakeMsg(msg.Data)
+			if err != nil {
+				continue
+			}
+
+			switch m := hsMsg.(type) {
+			case *HelloMessage:
+				t.Logf("[node1] Received HelloMessage (version=%d)", m.Version)
+				// Receive Hello → Send PubKey
+				pubKeyMsg := PubKeyMessage{PublicKey: pub1}
+				data, _ := marshalHandshakeMsg(pubKeyMsg)
+				if err := node1.Send(node2.PeerID(), streams.HandshakeStreamName, data); err != nil {
+					return
+				}
+				t.Log("[node1] Sent PubKeyMessage")
+
+			case *PubKeyMessage:
+				t.Log("[node1] Received PubKeyMessage")
+				// Receive PubKey → Send Complete
+				completeMsg := CompleteMessage{Success: true}
+				data, _ := marshalHandshakeMsg(completeMsg)
+				if err := node1.Send(node2.PeerID(), streams.HandshakeStreamName, data); err != nil {
+					return
+				}
+				t.Log("[node1] Sent CompleteMessage")
+
+			case *CompleteMessage:
+				t.Log("[node1] Received CompleteMessage - would complete handshake")
+			}
+		}
+	}()
+
+	// Node2's message handler: INTENTIONALLY STALLS - never sends Complete
+	go func() {
+		for msg := range node2.Messages() {
+			if msg.StreamName != streams.HandshakeStreamName {
+				continue
+			}
+
+			hsMsg, err := unmarshalHandshakeMsg(msg.Data)
+			if err != nil {
+				continue
+			}
+
+			switch m := hsMsg.(type) {
+			case *HelloMessage:
+				t.Logf("[node2] Received HelloMessage (version=%d)", m.Version)
+				// DO NOT send PubKey - intentionally stall
+
+			case *PubKeyMessage:
+				t.Log("[node2] Received PubKeyMessage - INTENTIONALLY NOT RESPONDING")
+				// DO NOT send Complete - intentionally stall to trigger timeout
+
+			case *CompleteMessage:
+				t.Log("[node2] Received CompleteMessage - IGNORING")
+			}
+		}
+	}()
+
+	// Add node2 to node1's address book
+	node1.AddPeer(node2.PeerID(), node2.Addrs(), nil)
+
+	// Node1 initiates connection
+	t.Log("Node1 connecting...")
+	if err := node1.Connect(node2.PeerID()); err != nil {
+		if !strings.Contains(err.Error(), "already connected") {
+			t.Fatalf("Connect failed: %v", err)
+		}
+	}
+	t.Log("Node1 connected - waiting for handshake timeout...")
+
+	// Wait for timeout (should happen within ~500ms + some buffer)
+	select {
+	case <-timeoutDetected:
+		t.Log("SUCCESS: Handshake timeout detected correctly!")
+	case err := <-errChan:
+		t.Fatalf("Error during test: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Test timeout: handshake timeout was not detected within expected time")
+	}
+
+	// Verify node1 is in cooldown state
+	state1 := node1.ConnectionState(node2.PeerID())
+	if state1 != StateCooldown && state1 != StateReconnecting {
+		t.Errorf("Expected node1 state Cooldown or Reconnecting, got %v", state1)
+	}
+	t.Logf("Node1 final state: %v", state1)
+}
+
+func TestIntegration_HandshakeTimeout_SlowComplete(t *testing.T) {
+	// This test verifies that if a node takes too long to send Complete,
+	// the handshake times out.
+	registerHandshakeTypes()
+
+	_, priv1, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv2, _ := ed25519.GenerateKey(rand.Reader)
+	pub1 := priv1.Public().(ed25519.PublicKey)
+	pub2 := priv2.Public().(ed25519.PublicKey)
+
+	dir1 := filepath.Join(os.TempDir(), "glueberry-slow-node1-"+randomSuffix())
+	dir2 := filepath.Join(os.TempDir(), "glueberry-slow-node2-"+randomSuffix())
+	defer os.RemoveAll(dir1)
+	defer os.RemoveAll(dir2)
+
+	listenAddr, _ := multiaddr.NewMultiaddr("/ip4/127.0.0.1/tcp/0")
+
+	cfg1 := NewConfig(priv1, filepath.Join(dir1, "ab.json"), []multiaddr.Multiaddr{listenAddr})
+	cfg2 := NewConfig(priv2, filepath.Join(dir2, "ab.json"), []multiaddr.Multiaddr{listenAddr})
+
+	// Set SHORT handshake timeout
+	cfg1.HandshakeTimeout = 300 * time.Millisecond
+	cfg2.HandshakeTimeout = 300 * time.Millisecond
+
+	node1, err := New(cfg1)
+	if err != nil {
+		t.Fatalf("Failed to create node1: %v", err)
+	}
+	node2, err := New(cfg2)
+	if err != nil {
+		t.Fatalf("Failed to create node2: %v", err)
+	}
+
+	if err := node1.Start(); err != nil {
+		t.Fatalf("Failed to start node1: %v", err)
+	}
+	if err := node2.Start(); err != nil {
+		t.Fatalf("Failed to start node2: %v", err)
+	}
+	defer node1.Stop()
+	defer node2.Stop()
+
+	t.Logf("Node1: %s", node1.PeerID())
+	t.Logf("Node2: %s", node2.PeerID())
+
+	timeoutDetected := make(chan struct{})
+	errChan := make(chan error, 4)
+
+	// Node1's event handler
+	go func() {
+		for event := range node1.Events() {
+			t.Logf("[node1] Event: %s", event.State)
+			if event.State == StateConnected && event.PeerID == node2.PeerID() {
+				helloMsg := HelloMessage{Version: 1}
+				data, _ := marshalHandshakeMsg(helloMsg)
+				_ = node1.Send(node2.PeerID(), streams.HandshakeStreamName, data)
+				t.Log("[node1] Sent HelloMessage")
+			}
+			if event.State == StateCooldown && event.PeerID == node2.PeerID() {
+				t.Logf("[node1] Timeout detected: %v", event.Error)
+				close(timeoutDetected)
+				return
+			}
+		}
+	}()
+
+	// Node2's event handler
+	go func() {
+		for event := range node2.Events() {
+			t.Logf("[node2] Event: %s", event.State)
+			if event.State == StateConnected && event.PeerID == node1.PeerID() {
+				helloMsg := HelloMessage{Version: 1}
+				data, _ := marshalHandshakeMsg(helloMsg)
+				_ = node2.Send(node1.PeerID(), streams.HandshakeStreamName, data)
+				t.Log("[node2] Sent HelloMessage")
+			}
+		}
+	}()
+
+	// Node1's message handler - normal flow
+	go func() {
+		for msg := range node1.Messages() {
+			if msg.StreamName != streams.HandshakeStreamName {
+				continue
+			}
+			hsMsg, _ := unmarshalHandshakeMsg(msg.Data)
+			switch hsMsg.(type) {
+			case *HelloMessage:
+				t.Log("[node1] Received Hello → Send PubKey")
+				pubKeyMsg := PubKeyMessage{PublicKey: pub1}
+				data, _ := marshalHandshakeMsg(pubKeyMsg)
+				_ = node1.Send(node2.PeerID(), streams.HandshakeStreamName, data)
+			case *PubKeyMessage:
+				t.Log("[node1] Received PubKey → Send Complete")
+				completeMsg := CompleteMessage{Success: true}
+				data, _ := marshalHandshakeMsg(completeMsg)
+				_ = node1.Send(node2.PeerID(), streams.HandshakeStreamName, data)
+			}
+		}
+	}()
+
+	// testDone signals when the test is complete (to avoid logging after test ends)
+	testDone := make(chan struct{})
+
+	// Node2's message handler - DELAYS sending Complete beyond timeout
+	go func() {
+		for msg := range node2.Messages() {
+			if msg.StreamName != streams.HandshakeStreamName {
+				continue
+			}
+			hsMsg, _ := unmarshalHandshakeMsg(msg.Data)
+			switch hsMsg.(type) {
+			case *HelloMessage:
+				t.Log("[node2] Received Hello → Send PubKey")
+				pubKeyMsg := PubKeyMessage{PublicKey: pub2}
+				data, _ := marshalHandshakeMsg(pubKeyMsg)
+				_ = node2.Send(node1.PeerID(), streams.HandshakeStreamName, data)
+			case *PubKeyMessage:
+				t.Log("[node2] Received PubKey → SLEEPING before sending Complete...")
+				// Sleep longer than HandshakeTimeout to trigger timeout
+				select {
+				case <-time.After(500 * time.Millisecond):
+					// Check if test is done before logging
+					select {
+					case <-testDone:
+						return
+					default:
+						t.Log("[node2] Woke up - trying to send Complete (too late)")
+					}
+				case <-testDone:
+					return
+				}
+				completeMsg := CompleteMessage{Success: true}
+				data, _ := marshalHandshakeMsg(completeMsg)
+				_ = node2.Send(node1.PeerID(), streams.HandshakeStreamName, data)
+			}
+		}
+	}()
+
+	node1.AddPeer(node2.PeerID(), node2.Addrs(), nil)
+
+	t.Log("Node1 connecting...")
+	if err := node1.Connect(node2.PeerID()); err != nil {
+		if !strings.Contains(err.Error(), "already connected") {
+			t.Fatalf("Connect failed: %v", err)
+		}
+	}
+
+	select {
+	case <-timeoutDetected:
+		t.Log("SUCCESS: Handshake timeout detected when Complete was delayed!")
+	case err := <-errChan:
+		t.Fatalf("Error: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Test timeout: handshake timeout was not detected")
+	}
+
+	close(testDone)
+}
+
+func randomSuffix() string {
+	buf := make([]byte, 8)
+	rand.Read(buf)
+	return fmt.Sprintf("%x", buf)
 }

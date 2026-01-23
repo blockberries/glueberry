@@ -15,7 +15,6 @@ func TestConnectionState_String(t *testing.T) {
 		{StateDisconnected, "Disconnected"},
 		{StateConnecting, "Connecting"},
 		{StateConnected, "Connected"},
-		{StateHandshaking, "Handshaking"},
 		{StateEstablished, "Established"},
 		{StateReconnecting, "Reconnecting"},
 		{StateCooldown, "Cooldown"},

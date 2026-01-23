@@ -8,23 +8,33 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/blockberries/glueberry"
+	"github.com/blockberries/glueberry/pkg/streams"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 )
 
-// HandshakeMessage is the message exchanged during handshake
-type HandshakeMessage struct {
-	NodeName  string `cramberry:"1,required"`
-	PublicKey []byte `cramberry:"2,required"`
+// Handshake message types
+const (
+	msgHello    byte = 1
+	msgPubKey   byte = 2
+	msgComplete byte = 3
+)
+
+// peerState tracks handshake progress for a peer
+type peerState struct {
+	name       string
+	gotHello   bool
+	gotPubKey  bool
+	peerPubKey ed25519.PublicKey
 }
 
-// ChatMessage is a text chat message
-type ChatMessage struct {
-	Sender  string `cramberry:"1,required"`
-	Content string `cramberry:"2,required"`
-}
+var (
+	peerStates   = make(map[peer.ID]*peerState)
+	peerStatesMu sync.Mutex
+)
 
 func main() {
 	// Parse command line flags
@@ -41,6 +51,7 @@ func main() {
 		fmt.Printf("Failed to load key: %v\n", err)
 		return
 	}
+	publicKey := privateKey.Public().(ed25519.PublicKey)
 
 	// Create listen address
 	listenAddr, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", *port))
@@ -65,25 +76,22 @@ func main() {
 	}
 	defer node.Stop()
 
-	fmt.Printf("╔════════════════════════════════════════╗\n")
-	fmt.Printf("║      Glueberry Simple Chat Node       ║\n")
-	fmt.Printf("╚════════════════════════════════════════╝\n\n")
+	fmt.Printf("========================================\n")
+	fmt.Printf("      Glueberry Simple Chat Node        \n")
+	fmt.Printf("========================================\n\n")
 	fmt.Printf("Your Name: %s\n", *name)
 	fmt.Printf("Peer ID:   %s\n", node.PeerID())
 	fmt.Printf("Listening: %v\n\n", node.Addrs())
 
-	// Handle incoming handshakes
-	go handleIncomingHandshakes(node, *name)
-
-	// Handle incoming messages
-	go handleIncomingMessages(node)
+	// Handle incoming messages (both handshake and chat)
+	go handleMessages(node, *name, publicKey)
 
 	// Handle connection events
 	go handleEvents(node)
 
 	// If peer address provided, connect
 	if *peerAddr != "" {
-		go connectToPeer(node, *peerAddr, *name)
+		go connectToPeer(node, *peerAddr, *name, publicKey)
 	}
 
 	// Interactive command loop
@@ -122,7 +130,7 @@ func main() {
 				fmt.Println("Usage: connect <multiaddr>")
 				continue
 			}
-			go connectToPeer(node, parts[1], *name)
+			go connectToPeer(node, parts[1], *name, publicKey)
 
 		case "send":
 			if len(parts) < 3 {
@@ -164,48 +172,76 @@ func loadOrGenerateKey(path string) (ed25519.PrivateKey, error) {
 	return priv, nil
 }
 
-func handleIncomingHandshakes(node *glueberry.Node, myName string) {
-	for incoming := range node.IncomingHandshakes() {
-		fmt.Printf("\n📞 Incoming connection from %s\n", incoming.PeerID)
-
-		// Receive handshake
-		var msg HandshakeMessage
-		if err := incoming.HandshakeStream.Receive(&msg); err != nil {
-			fmt.Printf("  ❌ Handshake failed: %v\n", err)
-			incoming.HandshakeStream.Close()
+func handleMessages(node *glueberry.Node, myName string, myPubKey ed25519.PublicKey) {
+	for msg := range node.Messages() {
+		// Handle handshake messages
+		if msg.StreamName == streams.HandshakeStreamName {
+			handleHandshakeMessage(node, msg, myName, myPubKey)
 			continue
 		}
 
-		fmt.Printf("  Peer name: %s\n", msg.NodeName)
-
-		// Send our handshake
-		ourMsg := HandshakeMessage{
-			NodeName:  myName,
-			PublicKey: node.PublicKey(),
-		}
-		if err := incoming.HandshakeStream.Send(&ourMsg); err != nil {
-			fmt.Printf("  ❌ Failed to send handshake: %v\n", err)
-			incoming.HandshakeStream.Close()
-			continue
-		}
-
-		// Establish encrypted streams
-		streamNames := []string{"chat"}
-		remotePubKey := ed25519.PublicKey(msg.PublicKey)
-		if err := node.EstablishEncryptedStreams(incoming.PeerID, remotePubKey, streamNames); err != nil {
-			fmt.Printf("  ❌ Failed to establish streams: %v\n", err)
-			continue
-		}
-
-		fmt.Printf("  ✅ Connected to %s\n\n", msg.NodeName)
+		// Handle chat messages
+		fmt.Printf("\n[%s]: %s\n> ", msg.PeerID.String()[:8], string(msg.Data))
 	}
 }
 
-func handleIncomingMessages(node *glueberry.Node) {
-	for msg := range node.Messages() {
-		// Deserialize chat message
-		// For simplicity, we're just treating it as raw bytes
-		fmt.Printf("\n💬 [%s]: %s\n> ", msg.PeerID, string(msg.Data))
+func handleHandshakeMessage(node *glueberry.Node, msg streams.IncomingMessage, myName string, myPubKey ed25519.PublicKey) {
+	if len(msg.Data) == 0 {
+		return
+	}
+
+	peerStatesMu.Lock()
+	state, ok := peerStates[msg.PeerID]
+	if !ok {
+		state = &peerState{}
+		peerStates[msg.PeerID] = state
+	}
+	peerStatesMu.Unlock()
+
+	switch msg.Data[0] {
+	case msgHello:
+		state.gotHello = true
+		if len(msg.Data) > 1 {
+			state.name = string(msg.Data[1:])
+		}
+		fmt.Printf("\nHandshake: Hello from %s\n> ", state.name)
+
+		// Send Hello back with our name
+		helloMsg := make([]byte, 1+len(myName))
+		helloMsg[0] = msgHello
+		copy(helloMsg[1:], myName)
+		_ = node.Send(msg.PeerID, streams.HandshakeStreamName, helloMsg)
+
+		// Send our public key
+		pubKeyMsg := make([]byte, 1+len(myPubKey))
+		pubKeyMsg[0] = msgPubKey
+		copy(pubKeyMsg[1:], myPubKey)
+		_ = node.Send(msg.PeerID, streams.HandshakeStreamName, pubKeyMsg)
+
+	case msgPubKey:
+		if len(msg.Data) > 1 {
+			state.peerPubKey = ed25519.PublicKey(msg.Data[1:])
+			state.gotPubKey = true
+			fmt.Printf("\nHandshake: PubKey received from %s\n> ", msg.PeerID.String()[:8])
+		}
+
+	case msgComplete:
+		fmt.Printf("\nHandshake: Complete received from %s\n> ", msg.PeerID.String()[:8])
+		if state.gotHello && state.gotPubKey {
+			// Send Complete back
+			_ = node.Send(msg.PeerID, streams.HandshakeStreamName, []byte{msgComplete})
+
+			// Complete the handshake
+			if err := node.CompleteHandshake(msg.PeerID, state.peerPubKey, []string{"chat"}); err != nil {
+				fmt.Printf("CompleteHandshake failed: %v\n> ", err)
+			} else {
+				fmt.Printf("Secure connection established with %s\n> ", state.name)
+			}
+
+			peerStatesMu.Lock()
+			delete(peerStates, msg.PeerID)
+			peerStatesMu.Unlock()
+		}
 	}
 }
 
@@ -213,95 +249,140 @@ func handleEvents(node *glueberry.Node) {
 	for event := range node.Events() {
 		switch event.State {
 		case glueberry.StateConnected:
-			fmt.Printf("\n🔗 Connected to %s\n> ", event.PeerID)
+			fmt.Printf("\nConnected to %s\n> ", event.PeerID.String()[:8])
 		case glueberry.StateEstablished:
-			fmt.Printf("\n✅ Secure connection established with %s\n> ", event.PeerID)
+			fmt.Printf("\nSecure connection established with %s\n> ", event.PeerID.String()[:8])
 		case glueberry.StateDisconnected:
 			if event.IsError() {
-				fmt.Printf("\n❌ Disconnected from %s: %v\n> ", event.PeerID, event.Error)
+				fmt.Printf("\nDisconnected from %s: %v\n> ", event.PeerID.String()[:8], event.Error)
 			} else {
-				fmt.Printf("\n👋 Disconnected from %s\n> ", event.PeerID)
+				fmt.Printf("\nDisconnected from %s\n> ", event.PeerID.String()[:8])
 			}
 		case glueberry.StateReconnecting:
-			fmt.Printf("\n🔄 Reconnecting to %s...\n> ", event.PeerID)
+			fmt.Printf("\nReconnecting to %s...\n> ", event.PeerID.String()[:8])
 		}
 	}
 }
 
-func connectToPeer(node *glueberry.Node, addrStr string, myName string) {
+func connectToPeer(node *glueberry.Node, addrStr string, myName string, myPubKey ed25519.PublicKey) {
 	fmt.Printf("Connecting to %s...\n", addrStr)
 
 	// Parse multiaddr
 	addr, err := multiaddr.NewMultiaddr(addrStr)
 	if err != nil {
-		fmt.Printf("❌ Invalid multiaddr: %v\n", err)
+		fmt.Printf("Invalid multiaddr: %v\n> ", err)
 		return
 	}
 
 	// Extract peer ID from multiaddr
 	peerInfo, err := peer.AddrInfoFromP2pAddr(addr)
 	if err != nil {
-		fmt.Printf("❌ Failed to parse peer info: %v\n", err)
+		fmt.Printf("Failed to parse peer info: %v\n> ", err)
 		return
 	}
+
+	// Initialize peer state
+	peerStatesMu.Lock()
+	peerStates[peerInfo.ID] = &peerState{}
+	peerStatesMu.Unlock()
 
 	// Add to address book
 	node.AddPeer(peerInfo.ID, peerInfo.Addrs, map[string]string{"name": "peer"})
 
 	// Connect
-	hs, err := node.Connect(peerInfo.ID)
-	if err != nil {
-		fmt.Printf("❌ Connect failed: %v\n", err)
+	if err := node.Connect(peerInfo.ID); err != nil {
+		fmt.Printf("Connect failed: %v\n> ", err)
 		return
 	}
 
-	// Send handshake
-	ourMsg := HandshakeMessage{
-		NodeName:  myName,
-		PublicKey: node.PublicKey(),
-	}
-	if err := hs.Send(&ourMsg); err != nil {
-		fmt.Printf("❌ Handshake send failed: %v\n", err)
+	// Send Hello with our name
+	helloMsg := make([]byte, 1+len(myName))
+	helloMsg[0] = msgHello
+	copy(helloMsg[1:], myName)
+	if err := node.Send(peerInfo.ID, streams.HandshakeStreamName, helloMsg); err != nil {
+		fmt.Printf("Failed to send Hello: %v\n> ", err)
 		return
 	}
 
-	// Receive handshake response
-	var response HandshakeMessage
-	if err := hs.Receive(&response); err != nil {
-		fmt.Printf("❌ Handshake receive failed: %v\n", err)
+	// Send our public key
+	pubKeyMsg := make([]byte, 1+len(myPubKey))
+	pubKeyMsg[0] = msgPubKey
+	copy(pubKeyMsg[1:], myPubKey)
+	if err := node.Send(peerInfo.ID, streams.HandshakeStreamName, pubKeyMsg); err != nil {
+		fmt.Printf("Failed to send PubKey: %v\n> ", err)
 		return
 	}
 
-	fmt.Printf("✅ Handshake complete with: %s\n", response.NodeName)
+	// Wait for response and send Complete when ready
+	// (handled by the message handler)
+	go func() {
+		peerStatesMu.Lock()
+		state := peerStates[peerInfo.ID]
+		peerStatesMu.Unlock()
 
-	// Establish encrypted streams
-	streamNames := []string{"chat"}
-	remotePubKey := ed25519.PublicKey(response.PublicKey)
-	if err := node.EstablishEncryptedStreams(peerInfo.ID, remotePubKey, streamNames); err != nil {
-		fmt.Printf("❌ Failed to establish streams: %v\n", err)
-		return
-	}
+		if state == nil {
+			return
+		}
 
-	fmt.Printf("✅ Secure connection established\n")
+		// Wait for PubKey to arrive (poll - in production use channels)
+		for i := 0; i < 100; i++ {
+			peerStatesMu.Lock()
+			state = peerStates[peerInfo.ID]
+			if state != nil && state.gotPubKey {
+				peerStatesMu.Unlock()
+				break
+			}
+			peerStatesMu.Unlock()
+			// time.Sleep(50 * time.Millisecond)
+		}
+
+		peerStatesMu.Lock()
+		state = peerStates[peerInfo.ID]
+		if state == nil || !state.gotPubKey {
+			peerStatesMu.Unlock()
+			return
+		}
+		peerPubKey := state.peerPubKey
+		peerStatesMu.Unlock()
+
+		// Send Complete
+		_ = node.Send(peerInfo.ID, streams.HandshakeStreamName, []byte{msgComplete})
+
+		// Complete handshake will be called when we receive Complete back
+		// But if we're the initiator, we can also complete here
+		if err := node.CompleteHandshake(peerInfo.ID, peerPubKey, []string{"chat"}); err != nil {
+			fmt.Printf("CompleteHandshake failed: %v\n> ", err)
+			return
+		}
+
+		peerStatesMu.Lock()
+		name := state.name
+		if name == "" {
+			name = peerInfo.ID.String()[:8]
+		}
+		delete(peerStates, peerInfo.ID)
+		peerStatesMu.Unlock()
+
+		fmt.Printf("Secure connection established with %s\n> ", name)
+	}()
 }
 
 func sendMessage(node *glueberry.Node, peerIDStr, sender, content string) {
 	peerID, err := peer.Decode(peerIDStr)
 	if err != nil {
-		fmt.Printf("❌ Invalid peer ID: %v\n", err)
+		fmt.Printf("Invalid peer ID: %v\n", err)
 		return
 	}
 
-	// For simplicity, just send raw bytes
-	// In production, you'd use Cramberry to serialize a ChatMessage struct
+	// Send message
 	message := fmt.Sprintf("[%s]: %s", sender, content)
 
 	if err := node.Send(peerID, "chat", []byte(message)); err != nil {
-		fmt.Printf("❌ Send failed: %v\n", err)
+		fmt.Printf("Send failed: %v\n", err)
 		return
 	}
 
-	fmt.Printf("Sent to %s\n", peerID)
+	fmt.Printf("Sent to %s\n", peerIDStr[:8])
 }
 
 func listPeers(node *glueberry.Node) {

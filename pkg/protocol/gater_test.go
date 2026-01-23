@@ -196,3 +196,84 @@ func TestNewConnectionGater(t *testing.T) {
 		t.Error("NewConnectionGater should set checker")
 	}
 }
+
+// mockStateChecker is a mock implementation of ConnectionStateChecker for testing.
+type mockStateChecker struct {
+	connecting map[peer.ID]bool
+}
+
+func newMockStateChecker() *mockStateChecker {
+	return &mockStateChecker{
+		connecting: make(map[peer.ID]bool),
+	}
+}
+
+func (m *mockStateChecker) IsConnecting(peerID peer.ID) bool {
+	return m.connecting[peerID]
+}
+
+func (m *mockStateChecker) SetConnecting(peerID peer.ID, connecting bool) {
+	m.connecting[peerID] = connecting
+}
+
+func TestConnectionGater_SetStateChecker(t *testing.T) {
+	checker := newMockChecker()
+	gater := NewConnectionGater(checker)
+
+	stateChecker := newMockStateChecker()
+	gater.SetStateChecker(stateChecker)
+
+	if gater.stateChecker != stateChecker {
+		t.Error("SetStateChecker should set the state checker")
+	}
+}
+
+func TestConnectionGater_InterceptSecured_Deduplication(t *testing.T) {
+	checker := newMockChecker()
+	gater := NewConnectionGater(checker)
+	stateChecker := newMockStateChecker()
+	gater.SetStateChecker(stateChecker)
+
+	peerID := mustParsePeerID(t, "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N")
+	local := mustParseMultiaddr(t, "/ip4/127.0.0.1/tcp/9000")
+	remote := mustParseMultiaddr(t, "/ip4/192.168.1.1/tcp/9001")
+	addrs := &mockConnMultiaddrs{local: local, remote: remote}
+
+	// Test 1: Inbound allowed when not connecting
+	if !gater.InterceptSecured(network.DirInbound, peerID, addrs) {
+		t.Error("InterceptSecured should allow inbound when not connecting")
+	}
+
+	// Test 2: Outbound always allowed (even if connecting)
+	stateChecker.SetConnecting(peerID, true)
+	if !gater.InterceptSecured(network.DirOutbound, peerID, addrs) {
+		t.Error("InterceptSecured should allow outbound (deduplication doesn't apply)")
+	}
+
+	// Test 3: Inbound blocked when already connecting (deduplication)
+	if gater.InterceptSecured(network.DirInbound, peerID, addrs) {
+		t.Error("InterceptSecured should block inbound when already connecting (deduplication)")
+	}
+
+	// Test 4: Inbound allowed again when no longer connecting
+	stateChecker.SetConnecting(peerID, false)
+	if !gater.InterceptSecured(network.DirInbound, peerID, addrs) {
+		t.Error("InterceptSecured should allow inbound when no longer connecting")
+	}
+}
+
+func TestConnectionGater_InterceptSecured_DeduplicationWithoutStateChecker(t *testing.T) {
+	checker := newMockChecker()
+	gater := NewConnectionGater(checker)
+	// Don't set state checker
+
+	peerID := mustParsePeerID(t, "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N")
+	local := mustParseMultiaddr(t, "/ip4/127.0.0.1/tcp/9000")
+	remote := mustParseMultiaddr(t, "/ip4/192.168.1.1/tcp/9001")
+	addrs := &mockConnMultiaddrs{local: local, remote: remote}
+
+	// Without state checker, all inbound should be allowed (deduplication disabled)
+	if !gater.InterceptSecured(network.DirInbound, peerID, addrs) {
+		t.Error("InterceptSecured should allow inbound when no state checker")
+	}
+}

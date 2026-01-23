@@ -9,7 +9,7 @@ the consuming application.
 
   - End-to-end encryption using ChaCha20-Poly1305 AEAD
   - X25519 ECDH key exchange from Ed25519 identity keys
-  - Application-controlled handshake protocol
+  - Symmetric, event-driven handshake API
   - Multiple named encrypted streams per peer
   - Automatic reconnection with exponential backoff
   - Peer blacklisting with connection-level enforcement
@@ -38,44 +38,61 @@ Create a node:
 
 Connect to a peer:
 
-	// Add peer to address book
+	// Add peer to address book (auto-connects when node is started)
 	node.AddPeer(peerID, peerAddrs, nil)
 
-	// Connect and get handshake stream
-	hs, err := node.Connect(peerID)
+	// Or explicitly connect
+	node.Connect(peerID)
 
-	// Perform your application's handshake
-	hs.Send(&MyHandshakeMsg{...})
-	hs.Receive(&response)
+Handle connection events (start handshake when connected):
 
-	// Establish encrypted streams
-	streamNames := []string{"blocks", "transactions"}
-	node.EstablishEncryptedStreams(peerID, peerPublicKey, streamNames)
+	for event := range node.Events() {
+		if event.State == glueberry.StateConnected {
+			// Send Hello to initiate handshake
+			node.Send(event.PeerID, streams.HandshakeStreamName, helloMsg)
+		}
+	}
 
-Send and receive messages:
+Handle handshake messages with event-driven flow:
 
-	// Send encrypted message
-	node.Send(peerID, "blocks", blockData)
+	// Receive Hello → Send PubKey
+	// Receive PubKey → Send Complete
+	// Receive Complete → CompleteHandshake()
+
+	for msg := range node.Messages() {
+		if msg.StreamName == streams.HandshakeStreamName {
+			switch parseMessageType(msg.Data) {
+			case MsgHello:
+				node.Send(msg.PeerID, streams.HandshakeStreamName, pubKeyMsg)
+			case MsgPubKey:
+				peerPubKey = extractPubKey(msg.Data)
+				node.Send(msg.PeerID, streams.HandshakeStreamName, completeMsg)
+			case MsgComplete:
+				node.CompleteHandshake(msg.PeerID, peerPubKey, []string{"messages"})
+			}
+		}
+	}
+
+Send and receive encrypted messages:
+
+	// Send encrypted message (after handshake complete)
+	node.Send(peerID, "messages", msgData)
 
 	// Receive messages
 	for msg := range node.Messages() {
-		fmt.Printf("From %s on %s: %s\n",
-			msg.PeerID, msg.StreamName, msg.Data)
-	}
-
-Handle incoming connections:
-
-	for incoming := range node.IncomingHandshakes() {
-		// Perform handshake with incoming peer
-		go handleHandshake(node, incoming)
+		if msg.StreamName == "messages" {
+			fmt.Printf("From %s: %s\n", msg.PeerID, msg.Data)
+		}
 	}
 
 Monitor connection events:
 
 	for event := range node.Events() {
 		switch event.State {
+		case glueberry.StateConnected:
+			fmt.Printf("Connected to %s (handshake stream ready)\n", event.PeerID)
 		case glueberry.StateEstablished:
-			fmt.Printf("Connected to %s\n", event.PeerID)
+			fmt.Printf("Secure connection with %s\n", event.PeerID)
 		case glueberry.StateDisconnected:
 			fmt.Printf("Disconnected from %s\n", event.PeerID)
 		}
@@ -96,6 +113,17 @@ Glueberry Responsibilities:
   - Automatic reconnection
   - Event notifications
 
+# Connection Flow
+
+ 1. AddPeer() or Connect() initiates connection
+ 2. On success, StateConnected event fires, handshake stream ready, timeout starts
+ 3. Application reacts to StateConnected by sending Hello
+ 4. Receive Hello → Send PubKey
+ 5. Receive PubKey → Send Complete
+ 6. Receive Complete → Call CompleteHandshake() with peer's public key
+ 7. State transitions to StateEstablished, timeout cancelled
+ 8. Encrypted streams become available
+
 # Security
 
   - Ed25519 signatures for identity
@@ -112,8 +140,7 @@ logged or exposed in error messages.
 # Thread Safety
 
 All public Node methods are thread-safe and can be called concurrently.
-Channels (Messages, Events, IncomingHandshakes) are safe for concurrent reads
-from a single consumer.
+Channels (Messages, Events) are safe for concurrent reads from a single consumer.
 
 # Dependencies
 

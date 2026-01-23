@@ -4,16 +4,17 @@
 
 ## Features
 
-- 🔐 **End-to-End Encryption** - ChaCha20-Poly1305 authenticated encryption with X25519 ECDH key exchange
-- 🤝 **App-Controlled Handshaking** - Flexible handshake protocol defined by your application
-- 🔄 **Automatic Reconnection** - Exponential backoff with jitter and configurable retry limits
-- 📡 **Stream Multiplexing** - Multiple named encrypted streams per peer connection
-- 🔌 **Bidirectional** - Both peers can initiate connections and streams
-- 🚫 **Blacklist Support** - Peer blacklisting with connection-level enforcement
-- 📊 **Event System** - Non-blocking connection state change notifications
-- 🧵 **Thread-Safe** - All public APIs safe for concurrent use
-- 🕳️ **NAT Traversal** - Built-in hole punching via libp2p
-- 💾 **Persistent Address Book** - JSON-based peer storage
+- End-to-End Encryption - ChaCha20-Poly1305 authenticated encryption with X25519 ECDH key exchange
+- Symmetric Event-Driven API - Same code handles both initiator and responder
+- App-Controlled Handshaking - Flexible handshake protocol defined by your application
+- Automatic Reconnection - Exponential backoff with jitter and configurable retry limits
+- Stream Multiplexing - Multiple named encrypted streams per peer connection
+- Bidirectional - Both peers can initiate connections and streams
+- Blacklist Support - Peer blacklisting with connection-level enforcement
+- Event System - Non-blocking connection state change notifications
+- Thread-Safe - All public APIs safe for concurrent use
+- NAT Traversal - Built-in hole punching via libp2p
+- Persistent Address Book - JSON-based peer storage
 
 ## Installation
 
@@ -36,12 +37,14 @@ import (
     "fmt"
 
     "github.com/blockberries/glueberry"
+    "github.com/blockberries/glueberry/pkg/streams"
     "github.com/multiformats/go-multiaddr"
 )
 
 func main() {
     // Generate identity key
     _, privateKey, _ := ed25519.GenerateKey(rand.Reader)
+    publicKey := privateKey.Public().(ed25519.PublicKey)
 
     // Configure listen address
     listenAddr, _ := multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/9000")
@@ -67,18 +70,35 @@ func main() {
     fmt.Printf("Node started with ID: %s\n", node.PeerID())
     fmt.Printf("Listening on: %v\n", node.Addrs())
 
-    // Add a peer and connect
-    // peerID, peerAddrs := ... // from somewhere
+    // Handle connection events - send Hello when connected
+    go func() {
+        for event := range node.Events() {
+            if event.State == glueberry.StateConnected {
+                // Connection established, send Hello to initiate handshake
+                node.Send(event.PeerID, streams.HandshakeStreamName, helloMsg)
+            }
+        }
+    }()
+
+    // Handle handshake messages with event-driven flow
+    go func() {
+        var peerPubKey ed25519.PublicKey
+        var gotPubKey, gotComplete bool
+
+        for msg := range node.Messages() {
+            if msg.StreamName == streams.HandshakeStreamName {
+                handleHandshakeMessage(node, msg, publicKey, &peerPubKey, &gotPubKey, &gotComplete)
+            } else {
+                // Handle encrypted message
+                fmt.Printf("Received: %s\n", msg.Data)
+            }
+        }
+    }()
+
+    // Connect to a peer (or use AddPeer for auto-connect)
     // node.AddPeer(peerID, peerAddrs, nil)
-    // hs, _ := node.Connect(peerID)
 
-    // Perform handshake and establish encrypted streams
-    // ... your handshake logic ...
-    // node.EstablishEncryptedStreams(peerID, peerPublicKey, []string{"messages"})
-
-    // Send/receive messages
-    // node.Send(peerID, "messages", data)
-    // msg := <-node.Messages()
+    select {} // Keep running
 }
 ```
 
@@ -105,70 +125,64 @@ node.Start()
 defer node.Stop()
 ```
 
-### 2. Connect to a Peer (Outgoing)
+### 2. Connect to a Peer
 
 ```go
-// Add peer to address book
+// Add peer to address book (auto-connects when node is started)
 peerAddr, _ := multiaddr.NewMultiaddr("/ip4/192.168.1.100/tcp/9000")
-node.AddPeer(peerID, []multiaddr.Multiaddr{peerAddr}, map[string]string{
-    "name": "validator-1",
-})
+node.AddPeer(peerID, []multiaddr.Multiaddr{peerAddr}, nil)
 
-// Connect and get handshake stream
-hs, err := node.Connect(peerID)
-if err != nil {
-    // Handle error
-}
+// Or explicitly connect if auto-connect isn't desired
+node.Connect(peerID)
 
-// Perform your application's handshake protocol
-type HandshakeMsg struct {
-    NodeID    string `cramberry:"1,required"`
-    PublicKey []byte `cramberry:"2,required"`
-}
-
-// Send handshake
-hs.Send(&HandshakeMsg{NodeID: "my-node", PublicKey: myPubKey})
-
-// Receive response
-var response HandshakeMsg
-hs.Receive(&response)
-
-// Establish encrypted streams after successful handshake
-streamNames := []string{"blocks", "transactions", "consensus"}
-node.EstablishEncryptedStreams(peerID, peerPublicKey, streamNames)
+// When connected, StateConnected event fires and handshake stream is ready
+// Your event handler should react by sending the first handshake message
 ```
 
-### 3. Accept Incoming Connections
+### 3. Handle Handshake Messages (Event-Driven)
+
+The handshake follows a reactive, event-driven flow where each message triggers the next step:
 
 ```go
-// Listen for incoming handshakes
-go func() {
-    for incoming := range node.IncomingHandshakes() {
-        go handleIncomingHandshake(node, incoming)
+// StateConnected event → Send Hello
+// Receive Hello → Send PubKey
+// Receive PubKey → Send Complete
+// Receive Complete → Call CompleteHandshake()
+
+var peerPubKey ed25519.PublicKey
+var gotPubKey, gotComplete bool
+
+for msg := range node.Messages() {
+    if msg.StreamName == streams.HandshakeStreamName {
+        switch msg.Data[0] {
+        case msgHello:
+            // Receive Hello → Send our public key
+            node.Send(msg.PeerID, streams.HandshakeStreamName, pubKeyMsg)
+
+        case msgPubKey:
+            // Receive PubKey → Store it and send Complete
+            peerPubKey = ed25519.PublicKey(msg.Data[1:])
+            gotPubKey = true
+            node.Send(msg.PeerID, streams.HandshakeStreamName, completeMsg)
+
+        case msgComplete:
+            // Receive Complete → Ready to finalize
+            gotComplete = true
+        }
+
+        // When we have both PubKey and Complete, finalize the handshake
+        if gotPubKey && gotComplete {
+            node.CompleteHandshake(msg.PeerID, peerPubKey, []string{"messages"})
+            gotPubKey, gotComplete = false, false // Reset for next peer
+        }
     }
-}()
-
-func handleIncomingHandshake(node *glueberry.Node, incoming protocol.IncomingHandshake) {
-    // Perform handshake
-    var msg HandshakeMsg
-    if err := incoming.HandshakeStream.Receive(&msg); err != nil {
-        incoming.HandshakeStream.Close()
-        return
-    }
-
-    // Send response
-    incoming.HandshakeStream.Send(&HandshakeMsg{...})
-
-    // Establish encrypted streams
-    streamNames := []string{"blocks", "transactions"}
-    node.EstablishEncryptedStreams(incoming.PeerID, remotePubKey, streamNames)
 }
 ```
 
-### 4. Send and Receive Messages
+### 4. Send and Receive Encrypted Messages
 
 ```go
-// Send encrypted message
+// Send encrypted message (after handshake complete)
 data := []byte("hello, peer!")
 if err := node.Send(peerID, "messages", data); err != nil {
     // Handle error
@@ -177,29 +191,28 @@ if err := node.Send(peerID, "messages", data); err != nil {
 // Receive messages
 go func() {
     for msg := range node.Messages() {
-        fmt.Printf("Received from %s on stream %s: %s\n",
-            msg.PeerID, msg.StreamName, msg.Data)
-
-        // Process the message
-        handleMessage(msg)
+        if msg.StreamName == "messages" {
+            fmt.Printf("Received from %s: %s\n", msg.PeerID, msg.Data)
+        }
     }
 }()
 ```
 
 ### 5. Monitor Connection Events
 
+Connection events drive the handshake flow. React to `StateConnected` to initiate:
+
 ```go
 go func() {
     for event := range node.Events() {
         fmt.Printf("Peer %s: %s\n", event.PeerID, event.State)
 
-        if event.IsError() {
-            fmt.Printf("  Error: %v\n", event.Error)
-        }
-
         switch event.State {
+        case glueberry.StateConnected:
+            // Handshake stream ready - send Hello to initiate handshake
+            node.Send(event.PeerID, streams.HandshakeStreamName, helloMsg)
         case glueberry.StateEstablished:
-            fmt.Println("  Connection fully established!")
+            fmt.Println("  Encrypted streams ready")
         case glueberry.StateDisconnected:
             fmt.Println("  Peer disconnected")
         }
@@ -258,30 +271,33 @@ cfg := glueberry.NewConfig(
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Application                               │
-├─────────────────────────────────────────────────────────────────┤
-│                      Glueberry Node                              │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │ AddressBook │  │  Connection │  │    Stream Manager       │  │
-│  │  (JSON)     │  │   Manager   │  │  (Encrypted Streams)    │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │   Crypto    │  │  Handshake  │  │    Event Dispatcher     │  │
-│  │   Module    │  │   Handler   │  │                         │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-├─────────────────────────────────────────────────────────────────┤
-│                         libp2p                                   │
-└─────────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------------+
+|                        Application                                 |
++-------------------------------------------------------------------+
+|                      Glueberry Node                                |
+|  +-------------+  +-------------+  +---------------------------+   |
+|  | AddressBook |  |  Connection |  |    Stream Manager         |   |
+|  |  (JSON)     |  |   Manager   |  | (Encrypted/Unencrypted)   |   |
+|  +-------------+  +-------------+  +---------------------------+   |
+|  +-------------+  +-------------+  +---------------------------+   |
+|  |   Crypto    |  |  Protocol   |  |    Event Dispatcher       |   |
+|  |   Module    |  |   Handlers  |  |                           |   |
+|  +-------------+  +-------------+  +---------------------------+   |
++-------------------------------------------------------------------+
+|                         libp2p                                     |
++-------------------------------------------------------------------+
 ```
 
 ### Connection Flow
 
-1. **App adds peer** → Address book stores multiaddrs
-2. **App calls Connect(peerID)** → Returns HandshakeStream
-3. **App performs handshake** → Exchanges messages via HandshakeStream
-4. **App calls EstablishEncryptedStreams()** → Opens encrypted multiplexed streams
-5. **App sends/receives** → Messages encrypted transparently
+1. **App adds peer** - Address book stores multiaddrs, auto-connects if started
+2. **StateConnected event** - libp2p connected, handshake stream ready, timeout starts
+3. **App sends Hello** - React to StateConnected by sending Hello message
+4. **Receive Hello → Send PubKey** - On receiving Hello, respond with public key
+5. **Receive PubKey → Send Complete** - On receiving PubKey, store it, send Complete
+6. **Receive Complete → CompleteHandshake()** - When both PubKey and Complete received, finalize
+7. **StateEstablished** - Encrypted streams become available, timeout cancelled
+8. **App sends/receives** - Messages encrypted transparently
 
 ### Encryption
 
@@ -296,7 +312,7 @@ cfg := glueberry.NewConfig(
 
 **Lifecycle:**
 - `New(cfg) (*Node, error)` - Create node
-- `Start() error` - Start listening
+- `Start() error` - Start listening and auto-connect to peers
 - `Stop() error` - Graceful shutdown
 
 **Information:**
@@ -305,7 +321,7 @@ cfg := glueberry.NewConfig(
 - `Addrs() []multiaddr.Multiaddr` - Listen addresses
 
 **Address Book:**
-- `AddPeer(peerID, addrs, metadata)` - Add/update peer
+- `AddPeer(peerID, addrs, metadata)` - Add/update peer (auto-connects if started)
 - `RemovePeer(peerID)` - Remove peer
 - `GetPeer(peerID)` - Get peer info
 - `ListPeers()` - List non-blacklisted peers
@@ -313,17 +329,16 @@ cfg := glueberry.NewConfig(
 - `UnblacklistPeer(peerID)` - Remove from blacklist
 
 **Connections:**
-- `Connect(peerID) (*HandshakeStream, error)` - Connect and get handshake stream
+- `Connect(peerID) error` - Explicitly connect to peer
 - `Disconnect(peerID)` - Close connection
 - `ConnectionState(peerID)` - Query state
 - `CancelReconnection(peerID)` - Stop reconnection
+- `CompleteHandshake(peerID, pubKey, streamNames)` - Complete handshake and setup encrypted streams
 
 **Messaging:**
-- `EstablishEncryptedStreams(peerID, pubKey, streamNames)` - Setup encrypted streams
-- `Send(peerID, streamName, data)` - Send encrypted message
-- `Messages() <-chan IncomingMessage` - Receive messages
+- `Send(peerID, streamName, data)` - Send message (handshake or encrypted)
+- `Messages() <-chan IncomingMessage` - Receive all messages
 - `Events() <-chan ConnectionEvent` - Connection events
-- `IncomingHandshakes() <-chan IncomingHandshake` - Incoming connections
 
 ## Connection States
 
@@ -331,8 +346,7 @@ cfg := glueberry.NewConfig(
 |-------|-------------|
 | `StateDisconnected` | No connection |
 | `StateConnecting` | Connection in progress |
-| `StateConnected` | libp2p connected, awaiting handshake |
-| `StateHandshaking` | Handshake in progress |
+| `StateConnected` | libp2p connected, handshake stream ready |
 | `StateEstablished` | Encrypted streams active |
 | `StateReconnecting` | Attempting reconnection |
 | `StateCooldown` | Waiting after failed handshake |

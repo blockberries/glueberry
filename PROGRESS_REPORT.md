@@ -1502,3 +1502,374 @@ Glueberry is a **production-ready P2P communication library** with all features 
 
 **✨ Production Ready:**
 The library is fully functional and ready for real-world P2P applications. Comprehensive unit test coverage ensures all components work correctly. Example applications demonstrate real-world usage.
+
+---
+
+## Symmetric Event-Driven API Refactor
+
+**Status:** ✅ Complete
+**Commit:** (pending)
+
+### Problem Identified
+The original API had an **asymmetric handshake model**:
+- Used `IncomingHandshakes()` channel for responder
+- Used `Connect()` returning `HandshakeStream` for initiator
+- Required different code paths for initiator vs responder
+- Used a separate `StateHandshaking` state
+- Violated true P2P symmetry principles
+
+### Solution: Symmetric Event-Driven API
+Refactored to use a **unified message-based handshake**:
+
+**Before (Asymmetric):**
+```go
+// Initiator:
+hs, _ := node1.Connect(peerID)
+hs.Send(&HandshakeMsg{...})
+hs.Receive(&response)
+node1.EstablishEncryptedStreams(...)
+
+// Responder:
+for incoming := range node.IncomingHandshakes() {
+    incoming.HandshakeStream.Receive(&msg)
+    incoming.HandshakeStream.Send(&response)
+    node.EstablishEncryptedStreams(...)
+}
+```
+
+**After (Symmetric):**
+```go
+// Same code for BOTH initiator and responder:
+for msg := range node.Messages() {
+    if msg.StreamName == streams.HandshakeStreamName {
+        // Handle handshake messages
+        switch msg.Data[0] {
+        case msgHello:
+            node.Send(msg.PeerID, streams.HandshakeStreamName, helloReply)
+        case msgPubKey:
+            peerPubKey = ed25519.PublicKey(msg.Data[1:])
+        case msgComplete:
+            node.CompleteHandshake(msg.PeerID, peerPubKey, []string{"messages"})
+        }
+    }
+}
+```
+
+### Implementation Changes
+
+**Phases Completed:**
+
+1. **Phase 1: UnencryptedStream Type**
+   - Created `pkg/streams/unencrypted.go`
+   - Same interface as EncryptedStream but without cipher
+   - Cramberry framing for message boundaries
+
+2. **Phase 2: Simplified State Machine**
+   - Removed `StateHandshaking` state
+   - New flow: Disconnected → Connecting → Connected → Established
+
+3. **Phase 3: Connection Deduplication**
+   - Added `ConnectionStateChecker` interface to gater
+   - Reject incoming if already `StateConnecting` (first to complete wins)
+
+4. **Phase 4: Auto-Connect on AddPeer**
+   - `AddPeer()` triggers auto-connect when node is started
+   - `Start()` auto-connects to all peers in address book
+
+5. **Phase 5-6: Handshake Timeout at StateConnected**
+   - Timeout starts when connection reaches `StateConnected`
+   - Applies to both initiator and responder
+
+7. **Phase 7: CompleteHandshake() Method**
+   - New method: `CompleteHandshake(peerID, peerPubKey, streamNames)`
+   - Cancels handshake timeout
+   - Derives and stores shared key
+   - Closes handshake stream
+   - Registers encrypted stream handlers
+   - Transitions to StateEstablished
+
+8. **Phase 8: Removed IncomingHandshakes Channel**
+   - Removed `incomingHandshakes` field from Node
+   - Removed `IncomingHandshakes()` method
+   - Removed `IncomingHandshake` and `HandshakeHandler` types
+
+9. **Phase 9: Updated Connect() Return Type**
+   - Changed from `(*HandshakeStream, error)` to `error`
+   - Initiator uses `Send()` on handshake stream after Connect()
+
+10. **Phase 10: Rewrote Integration Test**
+    - Demonstrates symmetric handshake flow
+    - Both nodes use identical message handling code
+    - Full bidirectional encrypted messaging verified
+
+11. **Phase 11: Updated Documentation and Examples**
+    - Updated `doc.go` with new API
+    - Updated `README.md` with new usage examples
+    - Updated `examples/basic/main.go`
+    - Updated `examples/simple-chat/main.go`
+
+### Connection Flow (New)
+```
+1. AddPeer() or Connect() initiates connection
+2. Connection established → StateConnected
+3. Handshake timeout starts
+4. "handshake" stream available (unencrypted)
+5. App exchanges Hello/PubKey/Complete messages via Send()/Messages()
+6. App calls CompleteHandshake()
+7. State transitions to StateEstablished
+8. Encrypted streams available
+```
+
+### Benefits
+
+1. **✅ True Symmetry** - Same code handles initiator and responder
+2. **✅ Simpler State Machine** - 5 states instead of 6
+3. **✅ Event-Driven** - All messages via Messages() channel
+4. **✅ Auto-Connect** - AddPeer() can trigger connections
+5. **✅ Connection Deduplication** - First to complete wins
+6. **✅ Cleaner API** - CompleteHandshake() finalizes everything
+
+### Test Results
+- ✅ All 217+ tests passing
+- ✅ Integration test demonstrates full symmetric flow
+- ✅ Bidirectional encrypted messaging verified
+- ✅ golangci-lint clean
+
+---
+
+## Integration Test Enhancement: Cramberry Polymorphic Messages
+
+**Status:** ✅ Complete
+
+### Overview
+Updated the integration test to use Cramberry's polymorphic interface support for handshake messages instead of simple byte-based message types. This demonstrates best practices for type-safe message handling.
+
+### Implementation
+
+**Handshake Message Interface:**
+```go
+type HandshakeMessage interface {
+    isHandshakeMessage()
+}
+```
+
+**Concrete Message Types:**
+- `HelloMessage` - Sent to initiate a handshake, contains protocol version
+- `PubKeyMessage` - Contains the sender's Ed25519 public key
+- `CompleteMessage` - Signals handshake completion with success flag
+
+**Type Registration:**
+```go
+const (
+    typeIDHelloMessage    cramberry.TypeID = 128
+    typeIDPubKeyMessage   cramberry.TypeID = 129
+    typeIDCompleteMessage cramberry.TypeID = 130
+)
+
+func registerHandshakeTypes() {
+    cramberry.DefaultRegistry.Clear()
+    cramberry.MustRegisterWithID[HelloMessage](typeIDHelloMessage)
+    cramberry.MustRegisterWithID[PubKeyMessage](typeIDPubKeyMessage)
+    cramberry.MustRegisterWithID[CompleteMessage](typeIDCompleteMessage)
+}
+```
+
+**HandshakeEnvelope for Polymorphic Serialization:**
+```go
+type HandshakeEnvelope struct {
+    Message HandshakeMessage `cramberry:"1"`
+}
+```
+
+### Key Changes
+- **File Modified:** `integration_working_test.go`
+- Replaced single-byte message type indicators with structured Cramberry types
+- Type switches use pointer types (`*HelloMessage`, `*PubKeyMessage`, `*CompleteMessage`) as Cramberry returns pointers for interface fields
+- Helper functions `marshalHandshakeMsg()` and `unmarshalHandshakeMsg()` handle envelope wrapping
+
+### Benefits
+1. **Type Safety** - Compile-time checking of message structures
+2. **Extensibility** - Easy to add fields to messages without breaking compatibility
+3. **Self-Documenting** - Message structure is clear from type definitions
+4. **Best Practice** - Demonstrates proper use of Cramberry polymorphism
+
+### Test Results
+- ✅ Integration test passes with Cramberry polymorphic messages
+- ✅ All unit tests passing
+- ✅ golangci-lint clean
+
+---
+
+## Integration Test Enhancement: Fully Event-Driven API
+
+**Status:** ✅ Complete
+
+### Overview
+Updated the integration test to demonstrate a fully event-driven, reactive handshake protocol.
+
+### Handshake Flow
+```
+StateConnected    → Send Hello
+Receive Hello     → Send PubKey
+Receive PubKey    → Send Complete
+Receive Complete  → CompleteHandshake (stop timeout, start encrypted streams)
+```
+
+### Implementation
+
+**Event Handler (identical for both nodes):**
+```go
+for event := range node.Events() {
+    if event.State == StateConnected {
+        sendHello(node, event.PeerID)  // StateConnected → Send Hello
+    }
+}
+```
+
+**Message Handler (identical for both nodes):**
+```go
+var peerPubKey ed25519.PublicKey
+var gotPubKey, gotComplete bool
+
+for msg := range node.Messages() {
+    switch m := unmarshalHandshakeMsg(msg.Data).(type) {
+    case *HelloMessage:
+        // Receive Hello → Send PubKey
+        node.Send(peerID, "handshake", pubKeyMsg)
+
+    case *PubKeyMessage:
+        peerPubKey = m.PublicKey
+        gotPubKey = true
+        // Receive PubKey → Send Complete
+        node.Send(peerID, "handshake", completeMsg)
+
+    case *CompleteMessage:
+        gotComplete = true
+    }
+
+    // Receive Complete (and have PubKey) → CompleteHandshake
+    if gotPubKey && gotComplete {
+        node.CompleteHandshake(peerID, peerPubKey, streamNames)
+        return
+    }
+}
+```
+
+### Benefits
+1. **Reactive** - Each action is a direct response to an event or message
+2. **Symmetric** - Identical code on both initiator and responder
+3. **Sequential** - Clear step-by-step protocol flow
+4. **Simple** - No complex state tracking, just respond to what you receive
+
+### Test Results
+- ✅ Integration test demonstrates correct handshake flow
+- ✅ All unit tests passing
+- ✅ golangci-lint clean
+
+---
+
+## Handshake Timeout Integration Tests
+
+**Status:** ✅ Complete
+
+### Overview
+Added integration tests to verify the handshake timeout behavior works correctly.
+
+### Tests Added
+
+**`TestIntegration_HandshakeTimeout`**
+- Sets a short handshake timeout (500ms)
+- Node2 intentionally stalls (doesn't respond to PubKey)
+- Verifies that Node1 transitions to `StateCooldown` with timeout error
+- Verifies the error message contains "handshake timeout"
+
+**`TestIntegration_HandshakeTimeout_SlowComplete`**
+- Sets a short handshake timeout (300ms)
+- Node2 delays sending Complete message beyond the timeout (sleeps 500ms)
+- Verifies that the handshake times out before the delayed Complete arrives
+
+### Bug Fixes
+
+**Race Condition in `setupHandshakeTimeout`** (`pkg/connection/manager.go`)
+- Fixed data race when setting `HandshakeTimer` and `HandshakeCancel` fields
+- Now acquires the connection mutex before writing these fields
+- This prevents races between the timeout timer callback and `CancelHandshakeTimeout()`
+
+**Flaky `randomSuffix()` Function**
+- Fixed to use hex encoding instead of raw bytes
+- Prevents invalid filename characters in temp directory paths
+
+### Test Results
+- ✅ All 3 integration tests pass consistently
+- ✅ No data races detected with `-race` flag
+- ✅ All unit tests passing
+- ✅ golangci-lint clean
+
+---
+
+## Documentation Update: Event-Driven Handshake Flow
+
+**Status:** ✅ Complete
+
+### Overview
+Updated all documentation to reflect the new symmetric, event-driven handshake API.
+
+### Files Updated
+
+**README.md:**
+- Updated Quick Start example to show event-driven handshake pattern
+- Revised "Connect to a Peer" section (removed redundant Send calls)
+- Rewrote "Handle Handshake Messages" section with correct reactive flow:
+  - StateConnected → Send Hello
+  - Receive Hello → Send PubKey
+  - Receive PubKey → Send Complete
+  - Receive Complete → CompleteHandshake()
+- Updated "Monitor Connection Events" to show Hello initiation on StateConnected
+- Updated Connection Flow section with 8-step event-driven flow
+
+**doc.go:**
+- Updated handshake example with event-driven flow
+- Revised Connection Flow section with 8-step description
+- Added connection event handling example
+
+**ARCHITECTURE.md:**
+- Removed `StateHandshaking` from connection states (5 states instead of 6)
+- Updated events emitted list (removed StateHandshaking)
+- Rewrote "Initial Connection & Handshake" sequence diagram showing full message exchange
+- Updated "Establishing Encrypted Streams" section to show it's via CompleteHandshake()
+- Updated Node Methods section with `CompleteHandshake()` instead of `EstablishEncryptedStreams()`
+- Revised "Reconnection Flow" diagram to show handshake stream handling
+- Updated "Handshake Stream" section (was "Handshake Handler") with new API
+- Updated "Stream Setup" section to describe lazy opening behavior
+
+### Key Documentation Changes
+
+**Connection States (Updated):**
+| State | Description |
+|-------|-------------|
+| `StateDisconnected` | No connection |
+| `StateConnecting` | Connection in progress |
+| `StateConnected` | libp2p connected, handshake stream ready, timeout started |
+| `StateEstablished` | Encrypted streams active, timeout cancelled |
+| `StateReconnecting` | Attempting reconnection |
+| `StateCooldown` | Waiting after failed handshake |
+
+**Handshake Flow (Updated):**
+1. AddPeer() or Connect() initiates connection
+2. StateConnected event fires, handshake stream ready, timeout starts
+3. Application reacts to StateConnected by sending Hello
+4. Receive Hello → Send PubKey
+5. Receive PubKey → Send Complete
+6. Receive Complete → Call CompleteHandshake() with peer's public key
+7. State transitions to StateEstablished, timeout cancelled
+8. Encrypted streams become available (lazy opening on first Send)
+
+### Benefits
+- Documentation now matches actual implementation
+- Clear event-driven pattern throughout all examples
+- Symmetric code examples work for both initiator and responder
+- Removed outdated references to StateHandshaking and EstablishEncryptedStreams
+
+---
+
+*Last updated: Documentation Update - Event-Driven Handshake Flow*

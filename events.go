@@ -17,13 +17,10 @@ const (
 	// StateConnecting indicates a connection attempt is in progress.
 	StateConnecting
 
-	// StateConnected indicates libp2p connection established,
-	// awaiting handshake initiation.
+	// StateConnected indicates libp2p connection established and the
+	// handshake stream is available. The app performs the handshake
+	// protocol via Send()/Messages() on the "handshake" stream.
 	StateConnected
-
-	// StateHandshaking indicates handshake stream is open and
-	// handshake is in progress.
-	StateHandshaking
 
 	// StateEstablished indicates handshake complete and
 	// encrypted streams are active.
@@ -46,8 +43,6 @@ func (s ConnectionState) String() string {
 		return "Connecting"
 	case StateConnected:
 		return "Connected"
-	case StateHandshaking:
-		return "Handshaking"
 	case StateEstablished:
 		return "Established"
 	case StateReconnecting:

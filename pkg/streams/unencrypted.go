@@ -1,0 +1,197 @@
+package streams
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"sync"
+	"time"
+
+	"github.com/blockberries/cramberry/pkg/cramberry"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+)
+
+// HandshakeStreamName is the name of the built-in unencrypted handshake stream.
+const HandshakeStreamName = "handshake"
+
+// UnencryptedStream provides a message-oriented interface for unencrypted
+// communication over a libp2p stream. This is used for the built-in "handshake"
+// stream where encryption is not yet established.
+//
+// Reads are handled by a background goroutine that forwards messages
+// to the incoming channel. Writes are serialized via a mutex.
+type UnencryptedStream struct {
+	name   string
+	peerID peer.ID
+	stream network.Stream
+
+	reader  *cramberry.MessageIterator
+	writer  *cramberry.StreamWriter
+	writeMu sync.Mutex
+
+	incoming chan<- IncomingMessage
+	ctx      context.Context
+	cancel   context.CancelFunc
+
+	closed   bool
+	closeMu  sync.Mutex
+	closeErr error
+}
+
+// NewUnencryptedStream creates a new unencrypted stream.
+// It starts a read goroutine to handle incoming messages.
+func NewUnencryptedStream(
+	ctx context.Context,
+	name string,
+	peerID peer.ID,
+	stream network.Stream,
+	incoming chan<- IncomingMessage,
+) *UnencryptedStream {
+	streamCtx, cancel := context.WithCancel(ctx)
+
+	us := &UnencryptedStream{
+		name:     name,
+		peerID:   peerID,
+		stream:   stream,
+		reader:   cramberry.NewMessageIterator(stream),
+		writer:   cramberry.NewStreamWriter(stream),
+		incoming: incoming,
+		ctx:      streamCtx,
+		cancel:   cancel,
+	}
+
+	// Start read goroutine
+	go us.readLoop()
+
+	return us
+}
+
+// Send sends data over the stream without encryption.
+// This method is thread-safe and can be called concurrently.
+func (us *UnencryptedStream) Send(data []byte) error {
+	us.closeMu.Lock()
+	if us.closed {
+		us.closeMu.Unlock()
+		return fmt.Errorf("stream is closed")
+	}
+	us.closeMu.Unlock()
+
+	// Write with mutex to serialize writes
+	us.writeMu.Lock()
+	defer us.writeMu.Unlock()
+
+	// Write the message as a delimited Cramberry message
+	if err := us.writer.WriteDelimited(&data); err != nil {
+		return fmt.Errorf("write failed: %w", err)
+	}
+
+	// Flush to ensure delivery
+	if err := us.writer.Flush(); err != nil {
+		return fmt.Errorf("flush failed: %w", err)
+	}
+
+	return nil
+}
+
+// readLoop continuously reads messages from the stream.
+func (us *UnencryptedStream) readLoop() {
+	defer us.markClosed(nil)
+
+	for {
+		select {
+		case <-us.ctx.Done():
+			// Stream closed
+			return
+		default:
+		}
+
+		// Read next message
+		var data []byte
+		if !us.reader.Next(&data) {
+			// Check for error or EOF
+			if err := us.reader.Err(); err != nil {
+				if err == io.EOF {
+					// Normal stream closure
+					return
+				}
+				// Read error
+				us.markClosed(fmt.Errorf("read error: %w", err))
+				return
+			}
+			// No more messages
+			return
+		}
+
+		// Send to incoming channel (non-blocking)
+		msg := IncomingMessage{
+			PeerID:     us.peerID,
+			StreamName: us.name,
+			Data:       data,
+			Timestamp:  time.Now(),
+		}
+
+		select {
+		case us.incoming <- msg:
+			// Message delivered
+		case <-us.ctx.Done():
+			// Stream closed while sending
+			return
+		default:
+			// Channel full - drop message to prevent blocking
+		}
+	}
+}
+
+// Close closes the unencrypted stream and stops the read goroutine.
+func (us *UnencryptedStream) Close() error {
+	us.closeMu.Lock()
+	if us.closed {
+		err := us.closeErr
+		us.closeMu.Unlock()
+		return err
+	}
+	us.closeMu.Unlock()
+
+	// Cancel context to stop read loop
+	us.cancel()
+
+	// Close the underlying stream
+	err := us.stream.Close()
+
+	us.markClosed(err)
+	return err
+}
+
+// markClosed marks the stream as closed with the given error.
+func (us *UnencryptedStream) markClosed(err error) {
+	us.closeMu.Lock()
+	defer us.closeMu.Unlock()
+
+	if !us.closed {
+		us.closed = true
+		us.closeErr = err
+	}
+}
+
+// IsClosed returns true if the stream is closed.
+func (us *UnencryptedStream) IsClosed() bool {
+	us.closeMu.Lock()
+	defer us.closeMu.Unlock()
+	return us.closed
+}
+
+// Name returns the stream name.
+func (us *UnencryptedStream) Name() string {
+	return us.name
+}
+
+// PeerID returns the peer ID.
+func (us *UnencryptedStream) PeerID() peer.ID {
+	return us.peerID
+}
+
+// Stream returns the underlying libp2p stream.
+func (us *UnencryptedStream) Stream() network.Stream {
+	return us.stream
+}

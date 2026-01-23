@@ -14,13 +14,10 @@ const (
 	// StateConnecting indicates a connection attempt is in progress.
 	StateConnecting
 
-	// StateConnected indicates libp2p connection established,
-	// awaiting handshake initiation.
+	// StateConnected indicates libp2p connection established and
+	// the handshake stream is available. The app performs the handshake
+	// protocol via Send()/Messages() on the "handshake" stream.
 	StateConnected
-
-	// StateHandshaking indicates handshake stream is open and
-	// handshake is in progress.
-	StateHandshaking
 
 	// StateEstablished indicates handshake complete and
 	// encrypted streams are active.
@@ -43,8 +40,6 @@ func (s ConnectionState) String() string {
 		return "Connecting"
 	case StateConnected:
 		return "Connected"
-	case StateHandshaking:
-		return "Handshaking"
 	case StateEstablished:
 		return "Established"
 	case StateReconnecting:
@@ -65,19 +60,20 @@ func (s ConnectionState) IsTerminal() bool {
 // IsActive returns true if the connection is in an active state
 // (connected or establishing).
 func (s ConnectionState) IsActive() bool {
-	return s == StateConnecting || s == StateConnected ||
-		s == StateHandshaking || s == StateEstablished
+	return s == StateConnecting || s == StateConnected || s == StateEstablished
 }
 
 // CanTransitionTo checks if a transition from the current state to
 // the target state is valid.
 func (s ConnectionState) CanTransitionTo(target ConnectionState) bool {
 	// Define valid state transitions
+	// StateConnected -> StateEstablished: when CompleteHandshake is called
+	// StateConnected -> StateCooldown: when handshake timeout fires
+	// StateConnected -> StateDisconnected: on connection failure
 	validTransitions := map[ConnectionState][]ConnectionState{
 		StateDisconnected: {StateConnecting, StateReconnecting},
 		StateConnecting:   {StateConnected, StateDisconnected},
-		StateConnected:    {StateHandshaking, StateDisconnected},
-		StateHandshaking:  {StateEstablished, StateDisconnected, StateCooldown},
+		StateConnected:    {StateEstablished, StateDisconnected, StateCooldown},
 		StateEstablished:  {StateDisconnected},
 		StateReconnecting: {StateConnecting, StateDisconnected},
 		StateCooldown:     {StateDisconnected, StateReconnecting},

@@ -19,7 +19,7 @@ func TestBackoffCalculator_NextDelay(t *testing.T) {
 		{1, time.Second, 3 * time.Second},        // 1s * 2^1 = 2s, with jitter
 		{2, 3 * time.Second, 5 * time.Second},    // 1s * 2^2 = 4s, with jitter
 		{3, 7 * time.Second, 9 * time.Second},    // 1s * 2^3 = 8s, with jitter
-		{10, 55 * time.Second, 66 * time.Second}, // Capped at 1m with jitter
+		{10, 54 * time.Second, 66 * time.Second}, // Capped at 1m with jitter (60s +/- 10%)
 	}
 
 	for _, tt := range tests {

@@ -115,8 +115,7 @@ type ConnectionState int
 const (
     StateDisconnected ConnectionState = iota
     StateConnecting
-    StateConnected          // libp2p connected, awaiting handshake
-    StateHandshaking        // Handshake stream open
+    StateConnected          // libp2p connected, handshake stream ready, timeout started
     StateEstablished        // Encrypted streams active
     StateReconnecting       // Attempting reconnection
     StateCooldown           // Waiting after failed handshake
@@ -136,42 +135,29 @@ const (
 **Cancellation:**
 - `CancelReconnection(peerID)` - Stop ongoing reconnection attempts
 
-### 4. Handshake Handler
+### 4. Handshake Stream
 
-Provides message-oriented interface for app-controlled handshaking.
+The handshake uses an unencrypted stream named "handshake" that is available immediately when `StateConnected` is reached. The app uses `Send()` and `Messages()` to exchange handshake messages, just like with encrypted streams.
 
 ```go
-type HandshakeStream struct {
-    stream     network.Stream
-    reader     *cramberry.MessageIterator
-    writer     *cramberry.StreamWriter
-    timeout    time.Duration
-    deadline   time.Time
+// Send handshake message
+node.Send(peerID, streams.HandshakeStreamName, helloMsg)
+
+// Receive handshake messages
+for msg := range node.Messages() {
+    if msg.StreamName == streams.HandshakeStreamName {
+        // Process handshake message
+    }
 }
 ```
 
-**Interface:**
-```go
-// Send a handshake message (any cramberry-serializable type)
-func (hs *HandshakeStream) Send(msg any) error
-
-// Receive a handshake message
-func (hs *HandshakeStream) Receive(msg any) error
-
-// Close the handshake stream
-func (hs *HandshakeStream) Close() error
-
-// Remaining time before timeout
-func (hs *HandshakeStream) TimeRemaining() time.Duration
-```
-
 **Timeout Handling:**
-- Deadline set when handshake stream opened
-- If app doesn't call `EstablishEncryptedStreams()` before timeout:
+- Handshake timeout starts when `StateConnected` is reached
+- If app doesn't call `CompleteHandshake()` before timeout:
   - Handshake stream closed
   - Connection dropped
   - Peer enters cooldown state
-  - `HandshakeTimeout` event emitted
+  - `StateDisconnected` event emitted with timeout error
 
 ### 5. Crypto Module
 
@@ -259,14 +245,15 @@ type IncomingMessage struct {
 }
 ```
 
-**Stream Setup:**
-1. App calls `EstablishEncryptedStreams(peerID, peerPubKey, streamNames)`
+**Stream Setup (Lazy Opening):**
+1. App calls `CompleteHandshake(peerID, peerPubKey, streamNames)`
 2. Crypto module derives shared key from ECDH
-3. For each stream name:
+3. Stream names are registered but streams are not opened yet
+4. On first `Send()` to a stream name:
    - Open libp2p stream with protocol ID `/glueberry/stream/<name>/1.0.0`
    - Wrap with encryption layer
    - Start read goroutine for incoming messages
-4. Return success to app
+5. Incoming streams are accepted and wrapped on arrival
 
 **Message Flow:**
 
@@ -316,9 +303,8 @@ type ConnectionEvent struct {
 
 **Events Emitted:**
 - `StateConnecting` - Connection attempt started
-- `StateConnected` - libp2p connection established
-- `StateHandshaking` - Handshake stream opened
-- `StateEstablished` - Encrypted streams active
+- `StateConnected` - libp2p connection established, handshake stream ready, timeout started
+- `StateEstablished` - Encrypted streams active, handshake timeout cancelled
 - `StateDisconnected` - Connection lost
 - `StateReconnecting` - Reconnection attempt starting
 - `StateCooldown` - Entered cooldown after failed handshake
@@ -366,13 +352,13 @@ func (n *Node) GetPeer(peerID peer.ID) (*PeerInfo, error)
 func (n *Node) ListPeers() []PeerInfo
 
 // Connection
-func (n *Node) Connect(peerID peer.ID) (*HandshakeStream, error)
+func (n *Node) Connect(peerID peer.ID) error
 func (n *Node) Disconnect(peerID peer.ID) error
 func (n *Node) CancelReconnection(peerID peer.ID) error
 func (n *Node) ConnectionState(peerID peer.ID) ConnectionState
 
-// Encryption & Streams (call after successful handshake)
-func (n *Node) EstablishEncryptedStreams(peerID peer.ID, peerPubKey ed25519.PublicKey, streamNames []string) error
+// Handshake Completion (call after exchanging handshake messages)
+func (n *Node) CompleteHandshake(peerID peer.ID, peerPubKey ed25519.PublicKey, streamNames []string) error
 
 // Messaging
 func (n *Node) Send(peerID peer.ID, streamName string, data []byte) error
@@ -417,48 +403,72 @@ For encrypted streams, the Cramberry payload contains:
      │                          │                             │
      │ AddPeer(peerID, addrs)   │                             │
      │─────────────────────────>│                             │
-     │                          │                             │
-     │ Connect(peerID)          │                             │
-     │─────────────────────────>│                             │
      │                          │  libp2p dial                │
      │                          │────────────────────────────>│
      │                          │  connection established     │
      │                          │<────────────────────────────│
      │                          │                             │
-     │                          │  open /glueberry/handshake  │
-     │                          │────────────────────────────>│
-     │  HandshakeStream         │                             │
+     │  <-Events()              │  start handshake timeout    │
+     │  (StateConnected)        │  open /glueberry/handshake  │
+     │<─────────────────────────│────────────────────────────>│
+     │                          │                             │
+     │  Send(peer, "handshake", │                             │
+     │       helloMsg)          │  forward                    │
+     │─────────────────────────>│────────────────────────────>│
+     │                          │                             │
+     │                          │  hello from remote          │
+     │  <-Messages() (Hello)    │<────────────────────────────│
      │<─────────────────────────│                             │
      │                          │                             │
-     │  hs.Send(hello)          │                             │
-     │─────────────────────────>│  forward                    │
-     │                          │────────────────────────────>│
+     │  Send(peer, "handshake", │                             │
+     │       pubKeyMsg)         │  forward                    │
+     │─────────────────────────>│────────────────────────────>│
      │                          │                             │
-     │                          │  response                   │
-     │  hs.Receive(resp)        │<────────────────────────────│
+     │                          │  pubkey from remote         │
+     │  <-Messages() (PubKey)   │<────────────────────────────│
      │<─────────────────────────│                             │
      │                          │                             │
-     │  ... app handshake ...   │                             │
+     │  Send(peer, "handshake", │                             │
+     │       completeMsg)       │  forward                    │
+     │─────────────────────────>│────────────────────────────>│
+     │                          │                             │
+     │                          │  complete from remote       │
+     │  <-Messages() (Complete) │<────────────────────────────│
+     │<─────────────────────────│                             │
+     │                          │                             │
+     │ CompleteHandshake(peer,  │                             │
+     │   pubKey, streamNames)   │  cancel timeout             │
+     │─────────────────────────>│  derive shared key          │
+     │                          │  setup encrypted streams    │
+     │                          │                             │
+     │  <-Events()              │                             │
+     │  (StateEstablished)      │                             │
+     │<─────────────────────────│                             │
      │                          │                             │
 ```
 
-### Establishing Encrypted Streams
+### Establishing Encrypted Streams (via CompleteHandshake)
 
 ```
     App                     Glueberry                    Remote Peer
      │                          │                             │
-     │ EstablishEncryptedStreams│                             │
+     │ CompleteHandshake        │                             │
      │ (peerID, pubKey, names)  │                             │
      │─────────────────────────>│                             │
+     │                          │  cancel handshake timeout   │
      │                          │                             │
      │                          │  ECDH key derivation        │
      │                          │  (local priv + remote pub)  │
      │                          │                             │
-     │                          │  for each stream name:      │
-     │                          │  open /glueberry/stream/X   │
-     │                          │────────────────────────────>│
-     │                          │  stream established         │
-     │                          │<────────────────────────────│
+     │                          │  close handshake stream     │
+     │                          │                             │
+     │                          │  register encrypted streams │
+     │                          │  (lazy - opened on first    │
+     │                          │   Send() call)              │
+     │                          │                             │
+     │                          │  store pubkey in addressbook│
+     │                          │                             │
+     │                          │  transition to Established  │
      │                          │                             │
      │  success                 │                             │
      │<─────────────────────────│                             │
@@ -512,12 +522,14 @@ For encrypted streams, the Cramberry payload contains:
      │                          │────────────────────────────>│
      │                          │  success                    │
      │                          │<────────────────────────────│
-     │  <-Events()              │                             │
-     │  (Connected)             │                             │
+     │                          │                             │
+     │  <-Events()              │  start handshake timeout    │
+     │  (StateConnected)        │  open handshake stream      │
      │<─────────────────────────│                             │
      │                          │                             │
-     │  Connect(peerID)         │  (returns existing hs)      │
-     │─────────────────────────>│                             │
+     │  Send Hello...           │  (app performs handshake    │
+     │  receive Hello...        │   same as initial connect)  │
+     │  ...                     │                             │
      │                          │                             │
 ```
 

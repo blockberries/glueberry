@@ -33,9 +33,8 @@ type Node struct {
 	eventDispatch *eventdispatch.Dispatcher
 
 	// Channels
-	events             <-chan eventdispatch.ConnectionEvent
-	messages           chan streams.IncomingMessage
-	incomingHandshakes chan protocol.IncomingHandshake
+	events   <-chan eventdispatch.ConnectionEvent
+	messages chan streams.IncomingMessage
 
 	// Lifecycle
 	ctx     context.Context
@@ -77,9 +76,6 @@ func New(cfg *Config) (*Node, error) {
 	// Create message channel
 	messagesChan := make(chan streams.IncomingMessage, cfg.MessageBufferSize)
 
-	// Create incoming handshakes channel
-	incomingHandshakesChan := make(chan protocol.IncomingHandshake, cfg.EventBufferSize)
-
 	// Create connection gater
 	gater := protocol.NewConnectionGater(addrBook)
 
@@ -113,25 +109,28 @@ func New(cfg *Config) (*Node, error) {
 
 	connMgr := connection.NewManager(ctx, libp2pHost, addrBook, connMgrConfig, dispatcher)
 
+	// Wire up connection deduplication: gater checks if we're already connecting
+	gater.SetStateChecker(connMgr)
+
 	return &Node{
-		config:             cfg,
-		crypto:             cryptoModule,
-		addressBook:        addrBook,
-		host:               libp2pHost,
-		connections:        connMgr,
-		streamManager:      streamMgr,
-		eventDispatch:      dispatcher,
-		events:             dispatcher.Events(),
-		messages:           messagesChan,
-		incomingHandshakes: incomingHandshakesChan,
-		ctx:                ctx,
-		cancel:             cancel,
-		started:            false,
+		config:        cfg,
+		crypto:        cryptoModule,
+		addressBook:   addrBook,
+		host:          libp2pHost,
+		connections:   connMgr,
+		streamManager: streamMgr,
+		eventDispatch: dispatcher,
+		events:        dispatcher.Events(),
+		messages:      messagesChan,
+		ctx:           ctx,
+		cancel:        cancel,
+		started:       false,
 	}, nil
 }
 
 // Start starts the node and begins listening for connections.
 // This must be called before the node can connect to peers or receive connections.
+// After starting, the node will automatically connect to all peers in the address book.
 func (n *Node) Start() error {
 	n.startMu.Lock()
 	defer n.startMu.Unlock()
@@ -140,16 +139,44 @@ func (n *Node) Start() error {
 		return ErrNodeAlreadyStarted
 	}
 
-	// Register handshake protocol handler
-	handshakeHandler := protocol.NewHandshakeHandler(n.config.HandshakeTimeout, n.incomingHandshakes)
-	n.host.LibP2PHost().SetStreamHandler(protocol.HandshakeProtocolID, handshakeHandler.HandleStream)
+	// Register handshake stream protocol handler for incoming connections
+	n.registerHandshakeStreamHandler()
 
 	// Note: Encrypted stream handlers are registered dynamically when streams are established
 	// because we need the shared key which is only available after handshake
 
 	n.started = true
 
+	// Auto-connect to all peers in address book
+	n.autoConnectToPeers()
+
 	return nil
+}
+
+// registerHandshakeStreamHandler registers the protocol handler for incoming handshake streams.
+func (n *Node) registerHandshakeStreamHandler() {
+	protoID := protocol.StreamProtocolID(streams.HandshakeStreamName)
+	handler := func(stream network.Stream) {
+		remotePeerID := stream.Conn().RemotePeer()
+
+		// Register the incoming connection
+		_ = n.connections.RegisterIncomingConnection(remotePeerID)
+
+		// Accept the incoming handshake stream
+		if err := n.streamManager.HandleIncomingHandshakeStream(remotePeerID, stream); err != nil {
+			_ = stream.Reset()
+			return
+		}
+	}
+	n.host.LibP2PHost().SetStreamHandler(protoID, handler)
+}
+
+// autoConnectToPeers initiates connections to all peers in the address book.
+func (n *Node) autoConnectToPeers() {
+	peers := n.addressBook.ListPeers()
+	for _, entry := range peers {
+		n.connections.AutoConnect(entry.PeerID)
+	}
 }
 
 // Stop shuts down the node and releases all resources.
@@ -178,9 +205,6 @@ func (n *Node) Stop() error {
 	// Close messages channel
 	close(n.messages)
 
-	// Close incoming handshakes channel
-	close(n.incomingHandshakes)
-
 	n.started = false
 
 	return nil
@@ -202,8 +226,22 @@ func (n *Node) Addrs() []multiaddr.Multiaddr {
 }
 
 // AddPeer adds a peer to the address book.
+// If the node is started, it will automatically attempt to connect to the peer.
 func (n *Node) AddPeer(peerID peer.ID, addrs []multiaddr.Multiaddr, metadata map[string]string) error {
-	return n.addressBook.AddPeer(peerID, addrs, metadata)
+	if err := n.addressBook.AddPeer(peerID, addrs, metadata); err != nil {
+		return err
+	}
+
+	// Auto-connect if node is started
+	n.startMu.Lock()
+	started := n.started
+	n.startMu.Unlock()
+
+	if started {
+		n.connections.AutoConnect(peerID)
+	}
+
+	return nil
 }
 
 // RemovePeer removes a peer from the address book.
@@ -243,13 +281,16 @@ func (n *Node) ListPeers() []*addressbook.PeerEntry {
 	return n.addressBook.ListPeers()
 }
 
-// Connect establishes a connection to a peer and returns a handshake stream.
-// The application must complete the handshake within the configured timeout.
-func (n *Node) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
+// Connect establishes a connection to a peer.
+// On success, the connection enters StateConnected and the "handshake" stream becomes available.
+// The application should listen for StateConnected events and perform the handshake
+// using Send() and Messages() on the "handshake" stream.
+// The handshake must be completed within the configured timeout by calling CompleteHandshake().
+func (n *Node) Connect(peerID peer.ID) error {
 	n.startMu.Lock()
 	if !n.started {
 		n.startMu.Unlock()
-		return nil, ErrNodeNotStarted
+		return ErrNodeNotStarted
 	}
 	n.startMu.Unlock()
 
@@ -259,6 +300,74 @@ func (n *Node) Connect(peerID peer.ID) (*streams.HandshakeStream, error) {
 // Disconnect closes the connection to a peer.
 func (n *Node) Disconnect(peerID peer.ID) error {
 	return n.connections.Disconnect(peerID)
+}
+
+// CompleteHandshake finalizes the handshake and establishes encrypted streams.
+// This should be called after both nodes have exchanged handshake messages
+// on the "handshake" stream and verified the peer's identity.
+//
+// The method:
+// 1. Cancels the handshake timeout
+// 2. Derives the shared encryption key from the peer's public key
+// 3. Closes the unencrypted "handshake" stream
+// 4. Registers handlers for incoming encrypted streams
+// 5. Stores the peer's public key in the address book
+// 6. Transitions the connection to StateEstablished
+//
+// After calling this method, the application can send/receive encrypted messages
+// on the specified stream names using Send() and Messages().
+func (n *Node) CompleteHandshake(
+	peerID peer.ID,
+	peerPubKey ed25519.PublicKey,
+	streamNames []string,
+) error {
+	n.startMu.Lock()
+	if !n.started {
+		n.startMu.Unlock()
+		return ErrNodeNotStarted
+	}
+	n.startMu.Unlock()
+
+	if len(streamNames) == 0 {
+		return ErrNoStreamsRequested
+	}
+
+	// 1. Cancel handshake timeout
+	if err := n.connections.CancelHandshakeTimeout(peerID); err != nil {
+		return fmt.Errorf("failed to cancel handshake timeout: %w", err)
+	}
+
+	// 2. Derive shared key
+	sharedKey, err := n.crypto.DeriveSharedKey(peerPubKey)
+	if err != nil {
+		return fmt.Errorf("failed to derive shared key: %w", err)
+	}
+
+	// 3. Store shared key in connection manager
+	if err := n.connections.SetSharedKey(peerID, sharedKey); err != nil {
+		return fmt.Errorf("failed to store shared key: %w", err)
+	}
+
+	// 4. Close handshake stream (non-fatal - may not exist if we were the receiver)
+	_ = n.streamManager.CloseHandshakeStream(peerID)
+
+	// 5. Register handlers for incoming encrypted streams
+	n.registerIncomingStreamHandlers(streamNames)
+
+	// 6. Establish encrypted streams via stream manager (lazy opening)
+	if err := n.streamManager.EstablishStreams(peerID, peerPubKey, streamNames); err != nil {
+		return err
+	}
+
+	// 7. Store public key in address book
+	_ = n.addressBook.UpdatePublicKey(peerID, peerPubKey)
+
+	// 8. Transition to StateEstablished
+	if err := n.connections.MarkEstablished(peerID); err != nil {
+		return fmt.Errorf("failed to mark connection as established: %w", err)
+	}
+
+	return nil
 }
 
 // ConnectionState returns the current connection state for a peer.
@@ -386,10 +495,4 @@ func (n *Node) Events() <-chan ConnectionEvent {
 	}()
 
 	return publicEvents
-}
-
-// IncomingHandshakes returns the channel for receiving incoming handshake streams.
-// The application should read from this channel to handle incoming connection requests.
-func (n *Node) IncomingHandshakes() <-chan protocol.IncomingHandshake {
-	return n.incomingHandshakes
 }

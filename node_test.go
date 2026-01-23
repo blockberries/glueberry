@@ -243,7 +243,7 @@ func TestNode_ConnectBeforeStart(t *testing.T) {
 	peerID, _ := peer.IDFromPublicKey(ed25519ToCryptoKey(peerPubKey))
 
 	// Connect before Start should fail
-	_, err = node.Connect(peerID)
+	err = node.Connect(peerID)
 	if err != ErrNodeNotStarted {
 		t.Errorf("Connect before Start should return ErrNodeNotStarted, got %v", err)
 	}
@@ -278,22 +278,6 @@ func TestNode_Events(t *testing.T) {
 	eventChan := node.Events()
 	if eventChan == nil {
 		t.Error("Events() should return non-nil channel")
-	}
-}
-
-func TestNode_IncomingHandshakes(t *testing.T) {
-	priv := generateNodeTestKey(t)
-	listenAddr, _ := multiaddr.NewMultiaddr("/ip4/127.0.0.1/tcp/0")
-	abPath := tempAddressBookPath(t)
-
-	cfg := NewConfig(priv, abPath, []multiaddr.Multiaddr{listenAddr})
-
-	node, _ := New(cfg)
-	defer node.Stop()
-
-	handshakesChan := node.IncomingHandshakes()
-	if handshakesChan == nil {
-		t.Error("IncomingHandshakes() should return non-nil channel")
 	}
 }
 

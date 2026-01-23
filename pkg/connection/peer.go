@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blockberries/glueberry/pkg/streams"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -19,11 +18,8 @@ type PeerConnection struct {
 	// State is the current connection state.
 	State ConnectionState
 
-	// HandshakeStream is available during handshaking.
-	// Set to nil after encrypted streams are established.
-	HandshakeStream *streams.HandshakeStream
-
 	// HandshakeTimer tracks the handshake timeout.
+	// Set when connection reaches StateConnected.
 	HandshakeTimer *time.Timer
 
 	// HandshakeCancel cancels the handshake timeout goroutine.
@@ -34,8 +30,8 @@ type PeerConnection struct {
 	SharedKey []byte
 
 	// EncryptedStreams maps stream names to their stream handlers.
-	// Populated when EstablishEncryptedStreams is called.
-	EncryptedStreams map[string]any // Will be *streams.EncryptedStream later
+	// Populated when CompleteHandshake is called.
+	EncryptedStreams map[string]any
 
 	// ReconnectState tracks reconnection attempts.
 	ReconnectState *ReconnectState
@@ -88,30 +84,11 @@ func (pc *PeerConnection) GetState() ConnectionState {
 	return pc.State
 }
 
-// SetHandshakeStream sets the handshake stream and transitions to Handshaking.
-func (pc *PeerConnection) SetHandshakeStream(hs *streams.HandshakeStream) error {
+// CancelHandshakeTimeout cancels the handshake timeout timer.
+// This is called when CompleteHandshake is invoked.
+func (pc *PeerConnection) CancelHandshakeTimeout() {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
-
-	if err := pc.State.ValidateTransition(StateHandshaking); err != nil {
-		return err
-	}
-
-	pc.HandshakeStream = hs
-	pc.State = StateHandshaking
-	pc.LastStateChange = time.Now()
-	return nil
-}
-
-// ClearHandshakeStream closes and clears the handshake stream.
-func (pc *PeerConnection) ClearHandshakeStream() error {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-
-	if pc.HandshakeStream != nil {
-		_ = pc.HandshakeStream.Close() // Ignore error - cleanup path
-		pc.HandshakeStream = nil
-	}
 
 	// Cancel handshake timer if exists
 	if pc.HandshakeTimer != nil {
@@ -124,8 +101,6 @@ func (pc *PeerConnection) ClearHandshakeStream() error {
 		pc.HandshakeCancel()
 		pc.HandshakeCancel = nil
 	}
-
-	return nil
 }
 
 // SetSharedKey stores the shared encryption key.
@@ -214,12 +189,6 @@ func (pc *PeerConnection) CooldownRemaining() time.Duration {
 func (pc *PeerConnection) Cleanup() {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
-
-	// Close handshake stream
-	if pc.HandshakeStream != nil {
-		pc.HandshakeStream.Close()
-		pc.HandshakeStream = nil
-	}
 
 	// Stop handshake timer
 	if pc.HandshakeTimer != nil {

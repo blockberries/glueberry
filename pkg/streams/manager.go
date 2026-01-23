@@ -16,12 +16,15 @@ type StreamOpener interface {
 	NewStream(ctx context.Context, peerID peer.ID, streamName string) (network.Stream, error)
 }
 
-// Manager manages encrypted streams for all connected peers.
+// Manager manages encrypted and unencrypted streams for all connected peers.
 // All public methods are thread-safe.
 type Manager struct {
 	host    StreamOpener
 	crypto  *crypto.Module
 	streams map[peer.ID]map[string]*EncryptedStream
+
+	// unencryptedStreams tracks unencrypted streams (e.g., "handshake" stream)
+	unencryptedStreams map[peer.ID]map[string]*UnencryptedStream
 
 	// allowedStreams tracks which stream names are allowed for each peer
 	allowedStreams map[peer.ID]map[string]bool
@@ -46,14 +49,15 @@ func NewManager(
 	managerCtx, cancel := context.WithCancel(ctx)
 
 	return &Manager{
-		host:           host,
-		crypto:         cryptoModule,
-		streams:        make(map[peer.ID]map[string]*EncryptedStream),
-		allowedStreams: make(map[peer.ID]map[string]bool),
-		sharedKeys:     make(map[peer.ID][]byte),
-		incoming:       incomingChan,
-		ctx:            managerCtx,
-		cancel:         cancel,
+		host:               host,
+		crypto:             cryptoModule,
+		streams:            make(map[peer.ID]map[string]*EncryptedStream),
+		unencryptedStreams: make(map[peer.ID]map[string]*UnencryptedStream),
+		allowedStreams:     make(map[peer.ID]map[string]bool),
+		sharedKeys:         make(map[peer.ID][]byte),
+		incoming:           incomingChan,
+		ctx:                managerCtx,
+		cancel:             cancel,
 	}
 }
 
@@ -97,10 +101,16 @@ func (m *Manager) EstablishStreams(
 	return nil
 }
 
-// Send sends data over an encrypted stream to a peer.
+// Send sends data over a stream to a peer.
 // If the stream doesn't exist, it is opened lazily.
+// The "handshake" stream is unencrypted; all other streams are encrypted.
 func (m *Manager) Send(peerID peer.ID, streamName string, data []byte) error {
-	// First try to get existing stream
+	// Route handshake stream to unencrypted path
+	if streamName == HandshakeStreamName {
+		return m.sendUnencrypted(peerID, streamName, data)
+	}
+
+	// First try to get existing encrypted stream
 	m.mu.RLock()
 	peerStreams, hasPeerStreams := m.streams[peerID]
 	var stream *EncryptedStream
@@ -121,6 +131,67 @@ func (m *Manager) Send(peerID peer.ID, streamName string, data []byte) error {
 	}
 
 	return stream.Send(data)
+}
+
+// sendUnencrypted sends data over an unencrypted stream.
+func (m *Manager) sendUnencrypted(peerID peer.ID, streamName string, data []byte) error {
+	// First try to get existing stream
+	m.mu.RLock()
+	peerStreams, hasPeerStreams := m.unencryptedStreams[peerID]
+	var stream *UnencryptedStream
+	if hasPeerStreams {
+		stream = peerStreams[streamName]
+	}
+	m.mu.RUnlock()
+
+	// If stream exists and is not closed, use it
+	if stream != nil && !stream.IsClosed() {
+		return stream.Send(data)
+	}
+
+	// Stream doesn't exist or is closed - open it lazily
+	stream, err := m.openUnencryptedStreamLazily(peerID, streamName)
+	if err != nil {
+		return err
+	}
+
+	return stream.Send(data)
+}
+
+// openUnencryptedStreamLazily opens an unencrypted stream on-demand.
+func (m *Manager) openUnencryptedStreamLazily(peerID peer.ID, streamName string) (*UnencryptedStream, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Double-check stream doesn't exist
+	if peerStreams, ok := m.unencryptedStreams[peerID]; ok {
+		if stream, exists := peerStreams[streamName]; exists && !stream.IsClosed() {
+			return stream, nil
+		}
+	}
+
+	// Open libp2p stream
+	rawStream, err := m.host.NewStream(m.ctx, peerID, streamName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stream %q: %w", streamName, err)
+	}
+
+	// Create unencrypted stream
+	unencStream := NewUnencryptedStream(
+		m.ctx,
+		streamName,
+		peerID,
+		rawStream,
+		m.incoming,
+	)
+
+	// Store the stream
+	if _, ok := m.unencryptedStreams[peerID]; !ok {
+		m.unencryptedStreams[peerID] = make(map[string]*UnencryptedStream)
+	}
+	m.unencryptedStreams[peerID][streamName] = unencStream
+
+	return unencStream, nil
 }
 
 // openStreamLazily opens a stream on-demand.
@@ -175,26 +246,108 @@ func (m *Manager) openStreamLazily(peerID peer.ID, streamName string) (*Encrypte
 	return encStream, nil
 }
 
-// CloseStreams closes all streams for a peer.
+// OpenHandshakeStream opens the built-in unencrypted handshake stream for a peer.
+// This is called when a connection reaches StateConnected.
+// The stream is opened lazily on first Send, but this method ensures the peer
+// is registered for the handshake stream.
+func (m *Manager) OpenHandshakeStream(peerID peer.ID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Initialize peer streams map if needed
+	if _, ok := m.unencryptedStreams[peerID]; !ok {
+		m.unencryptedStreams[peerID] = make(map[string]*UnencryptedStream)
+	}
+
+	return nil
+}
+
+// CloseHandshakeStream closes the handshake stream for a peer.
+// This is called when CompleteHandshake is invoked.
+func (m *Manager) CloseHandshakeStream(peerID peer.ID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	peerStreams, ok := m.unencryptedStreams[peerID]
+	if !ok {
+		return nil // No handshake stream exists
+	}
+
+	stream, exists := peerStreams[HandshakeStreamName]
+	if !exists || stream == nil {
+		return nil
+	}
+
+	err := stream.Close()
+	delete(peerStreams, HandshakeStreamName)
+
+	return err
+}
+
+// HandleIncomingHandshakeStream handles an incoming handshake stream from a remote peer.
+func (m *Manager) HandleIncomingHandshakeStream(
+	peerID peer.ID,
+	stream network.Stream,
+) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Get or create peer streams map
+	peerStreams, ok := m.unencryptedStreams[peerID]
+	if !ok {
+		peerStreams = make(map[string]*UnencryptedStream)
+		m.unencryptedStreams[peerID] = peerStreams
+	}
+
+	// Check if stream already exists
+	if existing, exists := peerStreams[HandshakeStreamName]; exists {
+		if !existing.IsClosed() {
+			return fmt.Errorf("handshake stream already exists for peer %s", peerID)
+		}
+		// Stream exists but is closed - replace it
+	}
+
+	// Create unencrypted stream
+	unencStream := NewUnencryptedStream(
+		m.ctx,
+		HandshakeStreamName,
+		peerID,
+		stream,
+		m.incoming,
+	)
+
+	peerStreams[HandshakeStreamName] = unencStream
+	return nil
+}
+
+// CloseStreams closes all streams (encrypted and unencrypted) for a peer.
 func (m *Manager) CloseStreams(peerID peer.ID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	peerStreams, ok := m.streams[peerID]
-	if !ok {
-		return fmt.Errorf("no streams for peer %s", peerID)
-	}
-
-	// Close all streams for this peer
 	var lastErr error
-	for _, stream := range peerStreams {
-		if err := stream.Close(); err != nil {
-			lastErr = err
+
+	// Close encrypted streams
+	if peerStreams, ok := m.streams[peerID]; ok {
+		for _, stream := range peerStreams {
+			if err := stream.Close(); err != nil {
+				lastErr = err
+			}
 		}
+		delete(m.streams, peerID)
 	}
 
-	// Remove from maps
-	delete(m.streams, peerID)
+	// Close unencrypted streams
+	if peerStreams, ok := m.unencryptedStreams[peerID]; ok {
+		for _, stream := range peerStreams {
+			if err := stream.Close(); err != nil {
+				lastErr = err
+			}
+		}
+		delete(m.unencryptedStreams, peerID)
+	}
+
+	// Remove from other maps
 	delete(m.allowedStreams, peerID)
 	delete(m.sharedKeys, peerID)
 
@@ -302,14 +455,22 @@ func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Close all streams
+	// Close all encrypted streams
 	for _, peerStreams := range m.streams {
 		for _, stream := range peerStreams {
 			stream.Close()
 		}
 	}
 
+	// Close all unencrypted streams
+	for _, peerStreams := range m.unencryptedStreams {
+		for _, stream := range peerStreams {
+			stream.Close()
+		}
+	}
+
 	m.streams = make(map[peer.ID]map[string]*EncryptedStream)
+	m.unencryptedStreams = make(map[peer.ID]map[string]*UnencryptedStream)
 	m.allowedStreams = make(map[peer.ID]map[string]bool)
 	m.sharedKeys = make(map[peer.ID][]byte)
 }
