@@ -266,11 +266,81 @@ This document tracks the implementation progress of the Glueberry P2P communicat
 
 ---
 
+## Phase 5: Handshake Stream
+
+**Status:** ✅ Complete
+**Commit:** (pending)
+
+### Files Created
+- `pkg/streams/handshake.go` - Message-oriented handshake stream interface
+- `pkg/streams/handshake_test.go` - Comprehensive handshake stream tests
+
+### Key Functionality
+
+#### HandshakeStream (`handshake.go`)
+- Wraps libp2p `network.Stream` for app-controlled handshaking
+- Uses Cramberry for message serialization/deserialization
+- Enforces timeout with automatic deadline setting
+- Thread-safety: NOT safe for concurrent use (document this)
+
+**API Methods:**
+- `NewHandshakeStream(stream, timeout)` - Create stream with deadline
+- `Send(msg any) error` - Serialize and send message via Cramberry
+- `Receive(msg any) error` - Read and deserialize message via Cramberry
+- `Close() error` - Close stream (safe to call multiple times)
+- `CloseWrite() error` - Close write side only
+- `TimeRemaining() time.Duration` - Time until deadline (returns 0 if expired)
+- `Deadline() time.Time` - Get absolute deadline
+- `Stream() network.Stream` - Access underlying stream
+- `IsClosed() bool` - Check if stream closed
+
+**Deadline Enforcement:**
+- Deadline set on creation: `time.Now() + timeout`
+- Stream deadline set via `stream.SetDeadline()`
+- Send/Receive check deadline before operation
+- Returns error if deadline expired
+- TimeRemaining() returns 0 after expiration
+
+**Message Serialization:**
+- Uses `cramberry.StreamWriter.WriteDelimited()` for sending
+- Uses `cramberry.MessageIterator.Next()` for receiving
+- Automatic flush after each send for immediate delivery
+- Supports any Cramberry-serializable message type
+- Handles EOF gracefully on receive
+
+### Test Coverage
+21 comprehensive tests covering:
+- Basic send/receive with round-trip verification
+- Multiple messages in sequence
+- Different message types (polymorphism)
+- Large messages (100KB)
+- Empty/minimal messages
+- Bidirectional communication
+- Close behavior (single, multiple calls)
+- CloseWrite vs full Close
+- TimeRemaining accuracy over time
+- Deadline expiration for Send/Receive
+- Operations after close (proper errors)
+- EOF handling on receive
+
+### Dependencies Added
+- `github.com/blockberries/cramberry` v0.0.0 (via replace directive to ../cramberry)
+
+### Design Decisions
+- NOT thread-safe (handshake is sequential by nature)
+- Deadline checked manually before operations (defense in depth with stream deadline)
+- Flush after every send ensures message delivery
+- Close is idempotent (safe multiple calls)
+- Returns descriptive errors for all failure cases
+- TimeRemaining caps at 0 (never negative)
+
+---
+
 ## Remaining Phases
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 5 | Handshake Stream | Pending |
+| 5 | Handshake Stream | ✅ Complete |
 | 6 | Connection Manager | Pending |
 | 7 | Encrypted Streams | Pending |
 | 8 | Event System | Pending |
@@ -289,6 +359,7 @@ This document tracks the implementation progress of the Glueberry P2P communicat
 | `pkg/crypto` | 45 | ✅ Pass |
 | `pkg/addressbook` | 34 | ✅ Pass |
 | `pkg/protocol` | 18 | ✅ Pass |
+| `pkg/streams` | 21 | ✅ Pass |
 
 All tests run with `-race` flag for race condition detection.
 
@@ -302,4 +373,4 @@ All tests run with `-race` flag for race condition detection.
 
 ---
 
-*Last updated: Phase 4 completion*
+*Last updated: Phase 5 completion*
