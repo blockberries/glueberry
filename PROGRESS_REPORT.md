@@ -502,13 +502,157 @@ No new external dependencies (uses existing libp2p and internal packages)
 
 ---
 
+## Phase 7: Encrypted Streams
+
+**Status:** ✅ Complete
+**Commit:** (pending)
+
+### Files Created
+- `pkg/streams/encrypted.go` - EncryptedStream with transparent encryption
+- `pkg/streams/encrypted_test.go` - EncryptedStream tests
+- `pkg/streams/manager.go` - Stream Manager for managing encrypted streams
+- `pkg/streams/manager_test.go` - Stream Manager tests
+
+### Key Functionality
+
+#### EncryptedStream (`encrypted.go`)
+- Wraps libp2p network.Stream with transparent ChaCha20-Poly1305 encryption
+- Uses Cramberry for message framing over encrypted channel
+- Background read goroutine forwards decrypted messages to channel
+- Thread-safe Send method with write mutex
+
+**Data Structures:**
+- `IncomingMessage` - Decrypted message with metadata (PeerID, StreamName, Data, Timestamp)
+- `EncryptedStream` struct with:
+  - Stream identification: name, peerID
+  - Cryptography: sharedKey, cipher (ChaCha20-Poly1305)
+  - Serialization: Cramberry reader/writer
+  - Concurrency: writeMu for send serialization
+  - Lifecycle: ctx/cancel for read loop, closed flag
+
+**Methods:**
+- `NewEncryptedStream()` - Creates stream and starts read goroutine
+- `Send(data []byte) error` - Encrypts, frames with Cramberry, and sends
+  - Thread-safe with write mutex
+  - Auto-flush for immediate delivery
+  - Returns error if stream closed
+- `Close() error` - Stops read loop, closes stream (idempotent)
+- `IsClosed() bool` - Thread-safe closure check
+- `Name()` / `PeerID()` / `Stream()` - Accessors
+
+**Read Loop (`readLoop`):**
+- Runs in background goroutine
+- Continuously reads delimited messages via Cramberry
+- Decrypts each message with ChaCha20-Poly1305
+- Forwards to incoming channel (non-blocking send)
+- Handles EOF gracefully (normal closure)
+- Skips messages with decryption failures (tampering protection)
+- Marks stream closed on error or EOF
+
+**Encryption Flow:**
+```
+Send(data) -> Encrypt -> Cramberry.WriteDelimited -> Flush -> Network
+Network -> Cramberry.Read -> Decrypt -> IncomingMessage channel
+```
+
+#### Stream Manager (`manager.go`)
+- Manages all encrypted streams across all peers
+- Thread-safe with RWMutex
+- Integrates with crypto module for key derivation
+
+**Manager Struct:**
+- `host` - StreamOpener interface for opening streams
+- `crypto` - Crypto module for shared key derivation
+- `streams` - Map: peer.ID -> stream name -> EncryptedStream
+- `incoming` - Channel for all incoming messages
+- Context for lifecycle management
+
+**Core Operations:**
+- `NewManager()` - Constructor with dependencies
+- `EstablishStreams(peerID, peerPubKey, streamNames)` - Setup flow:
+  - Derives shared key from peer's Ed25519 public key via crypto module
+  - Checks for duplicate streams
+  - Opens libp2p stream for each stream name
+  - Creates EncryptedStream for each
+  - Stores in streams map
+  - Automatic rollback on partial failure (closes opened streams)
+
+- `Send(peerID, streamName, data)` - Send encrypted message:
+  - Looks up stream by peer and name
+  - Delegates to EncryptedStream.Send()
+  - Returns error if peer/stream not found
+
+- `CloseStreams(peerID)` - Close all streams for peer:
+  - Closes each EncryptedStream
+  - Removes from map
+  - Returns last error encountered
+
+- `HandleIncomingStream()` - Handle remote-initiated streams:
+  - Adds incoming stream to peer's stream map
+  - Creates EncryptedStream with provided shared key
+  - Prevents duplicate stream names
+
+**Query Methods:**
+- `GetStream(peerID, streamName)` - Retrieve specific stream
+- `HasStreams(peerID)` - Check if peer has any streams
+- `ListStreams(peerID)` - Get all stream names for peer
+- `Shutdown()` - Close all streams, cleanup
+
+### Test Coverage
+27 tests across 2 test files:
+
+**EncryptedStream Tests (encrypted_test.go):**
+- Send/receive with proper encryption/decryption
+- Multiple sequential messages
+- Close behavior and idempotency
+- Name/PeerID accessors
+- Concurrent sends from multiple goroutines (10 goroutines × 10 messages)
+- Read loop EOF handling
+
+**Stream Manager Tests (manager_test.go):**
+- Manager creation
+- EstablishStreams with multiple stream names
+- Validation: no stream names, duplicate establishment
+- Send operations (success and error cases)
+- Peer not found, stream not found errors
+- CloseStreams cleanup verification
+- HandleIncomingStream for remote-initiated streams
+- Duplicate incoming stream rejection
+- Shutdown cleanup
+
+### Design Decisions
+- Read loop runs per stream (not per peer) for isolation
+- Non-blocking send to incoming channel prevents slow consumer from blocking
+- Decryption failures are logged but don't close stream (defense against malicious input)
+- Write mutex ensures message atomicity
+- Auto-flush after send guarantees delivery
+- Shared key passed explicitly (not looked up) for flexibility
+- Manager tracks all streams globally for centralized control
+- Partial establishment failure triggers rollback (all-or-nothing semantics)
+
+### Thread Safety
+- EncryptedStream.Send is thread-safe (write mutex)
+- EncryptedStream.Close is thread-safe (close mutex)
+- Manager methods are all thread-safe (RWMutex)
+- Read loop is single-threaded per stream
+- Incoming channel shared across all streams (thread-safe by design)
+
+### Testing Approach
+- Uses io.Pipe for realistic bidirectional communication in tests
+- Mock stream updated with mutex for race-free testing
+- Tests verify encryption/decryption round-trip
+- Concurrent send tests verify write serialization
+- Manager tests use mock StreamOpener for isolation
+
+---
+
 ## Remaining Phases
 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 5 | Handshake Stream | ✅ Complete |
 | 6 | Connection Manager | ✅ Complete |
-| 7 | Encrypted Streams | Pending |
+| 7 | Encrypted Streams | ✅ Complete |
 | 8 | Event System | Pending |
 | 9 | Node (Public API) | Pending |
 | 10 | Incoming Connection Handling | Pending |
@@ -525,7 +669,7 @@ No new external dependencies (uses existing libp2p and internal packages)
 | `pkg/crypto` | 45 | ✅ Pass |
 | `pkg/addressbook` | 34 | ✅ Pass |
 | `pkg/protocol` | 18 | ✅ Pass |
-| `pkg/streams` | 21 | ✅ Pass |
+| `pkg/streams` | 48 | ✅ Pass |
 | `pkg/connection` | 35 | ✅ Pass |
 
 All tests run with `-race` flag for race condition detection.
@@ -540,4 +684,4 @@ All tests run with `-race` flag for race condition detection.
 
 ---
 
-*Last updated: Phase 6 completion*
+*Last updated: Phase 7 completion*

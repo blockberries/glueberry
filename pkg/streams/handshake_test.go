@@ -3,6 +3,7 @@ package streams
 import (
 	"bytes"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ type mockStream struct {
 	writer   io.Writer
 	deadline time.Time
 	closed   bool
+	mu       sync.Mutex
 }
 
 func newMockStream(r io.Reader, w io.Writer) *mockStream {
@@ -26,31 +28,45 @@ func newMockStream(r io.Reader, w io.Writer) *mockStream {
 }
 
 func (m *mockStream) Read(p []byte) (n int, err error) {
-	if m.closed {
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+
+	if closed {
 		return 0, io.EOF
 	}
 	return m.reader.Read(p)
 }
 
 func (m *mockStream) Write(p []byte) (n int, err error) {
-	if m.closed {
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+
+	if closed {
 		return 0, io.ErrClosedPipe
 	}
 	return m.writer.Write(p)
 }
 
 func (m *mockStream) Close() error {
+	m.mu.Lock()
 	m.closed = true
+	m.mu.Unlock()
 	return nil
 }
 
 func (m *mockStream) Reset() error {
+	m.mu.Lock()
 	m.closed = true
+	m.mu.Unlock()
 	return nil
 }
 
 func (m *mockStream) ResetWithError(code network.StreamErrorCode) error {
+	m.mu.Lock()
 	m.closed = true
+	m.mu.Unlock()
 	return nil
 }
 
