@@ -1477,7 +1477,6 @@ Glueberry is a **production-ready P2P communication library** with all features 
   - ARCHITECTURE.md (detailed design)
   - IMPLEMENTATION_PLAN.md (development roadmap)
   - PROGRESS_REPORT.md (this document)
-- **1 development guide** (CLAUDE.md - gitignored)
 - **2 working examples** (basic, simple-chat)
 - Clean, well-documented Go code
 - Makefile + golangci-lint configuration
@@ -1872,4 +1871,88 @@ Updated all documentation to reflect the new symmetric, event-driven handshake A
 
 ---
 
-*Last updated: Documentation Update - Event-Driven Handshake Flow*
+## Documentation Enhancement
+
+**Status:** ✅ Complete
+
+### Overview
+Comprehensive documentation review and enhancement to ensure all documentation accurately reflects the current implementation.
+
+### Files Updated
+
+**README.md:**
+- Enhanced API Reference section with detailed method signatures in table format
+- Added `PeerAddrs()` method documentation (was missing)
+- Added comprehensive Error Handling section with all sentinel errors
+- Expanded Security Considerations with detailed subsections:
+  - Key Security
+  - Message Security
+  - Network Security
+  - Thread Safety
+- Improved Architecture diagram with ASCII art showing all components
+- Added Core Data Types section documenting:
+  - `IncomingMessage` struct
+  - `ConnectionEvent` struct
+  - `PeerEntry` struct
+- Enhanced Connection Flow with visual diagram and failure scenarios
+- Added Design Philosophy section explaining key design decisions:
+  - Library, Not Application
+  - Symmetric P2P API
+  - Two-Phase Handshake
+  - Lazy Stream Opening
+  - Non-Blocking Events
+  - Security by Default
+
+**doc.go:**
+- Added detailed comments explaining two-phase handshake rationale
+- Added Important Constants section for `streams.HandshakeStreamName`
+- Updated See Also section with all documentation files
+- Improved code examples with better comments
+
+### Test Results
+- ✅ All 7 packages passing
+- ✅ golangci-lint clean
+- ✅ Build successful
+
+### API Documentation Summary
+
+**Total Public Methods:** 21 methods on Node
+
+| Category | Count | Methods |
+|----------|-------|---------|
+| Lifecycle | 3 | New, Start, Stop |
+| Information | 3 | PeerID, PublicKey, Addrs |
+| Address Book | 7 | AddPeer, RemovePeer, GetPeer, ListPeers, PeerAddrs, BlacklistPeer, UnblacklistPeer |
+| Connections | 4 | Connect, Disconnect, ConnectionState, CancelReconnection |
+| Handshake | 4 | PrepareStreams, FinalizeHandshake, CompleteHandshake, EstablishEncryptedStreams |
+| Messaging | 3 | Send, Messages, Events |
+
+### Key Documentation Highlights
+
+1. **Two-Phase Handshake API** fully documented:
+   - `PrepareStreams()` - Derive key, register handlers, become ready to receive
+   - `FinalizeHandshake()` - Transition to Established after peer confirmation
+   - `CompleteHandshake()` - Convenience method combining both phases
+
+2. **Error Handling** comprehensive with all sentinel errors:
+   - 3 Peer/Address Book errors
+   - 7 Connection errors
+   - 4 Stream errors
+   - 5 Crypto errors
+   - 3 Node errors
+
+3. **Security Model** detailed:
+   - Ed25519 identity → X25519 ECDH → ChaCha20-Poly1305
+   - HKDF-SHA256 key derivation
+   - Random 96-bit nonces
+   - Poly1305 authentication
+
+4. **Design Philosophy** explained for better understanding:
+   - Why app owns peer discovery and handshake protocols
+   - Why two-phase handshake prevents race conditions
+   - Why lazy stream opening improves symmetry
+   - Why non-blocking events prevent DoS
+
+---
+
+*Last updated: Documentation Enhancement - Comprehensive Review*

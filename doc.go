@@ -55,30 +55,39 @@ Handle connection events (start handshake when connected):
 
 Handle handshake messages with two-phase completion:
 
-	// Receive Hello → Send PubKey
-	// Receive PubKey → PrepareStreams() + Send Complete
-	// Receive Complete → FinalizeHandshake()
+	// The two-phase handshake prevents race conditions:
+	// - PrepareStreams() derives the key and makes you ready to receive
+	// - FinalizeHandshake() only called after peer confirms they're also ready
+	//
+	// Flow: Hello → PubKey → Complete (from both sides)
 
+	var peerPubKey ed25519.PublicKey
 	var streamsPrepared, gotComplete bool
 
 	for msg := range node.Messages() {
 		if msg.StreamName == streams.HandshakeStreamName {
 			switch parseMessageType(msg.Data) {
 			case MsgHello:
+				// Respond with our public key
 				node.Send(msg.PeerID, streams.HandshakeStreamName, pubKeyMsg)
+
 			case MsgPubKey:
 				peerPubKey = extractPubKey(msg.Data)
-				// Prepare streams first (ready to receive encrypted messages)
+				// Phase 1: Prepare streams (ready to receive encrypted messages)
 				node.PrepareStreams(msg.PeerID, peerPubKey, []string{"messages"})
 				streamsPrepared = true
 				// Signal readiness to peer
 				node.Send(msg.PeerID, streams.HandshakeStreamName, completeMsg)
+
 			case MsgComplete:
 				gotComplete = true
 			}
-			// Finalize when both sides ready
+
+			// Phase 2: Finalize when BOTH sides are ready
 			if streamsPrepared && gotComplete {
 				node.FinalizeHandshake(msg.PeerID)
+				// Reset for next peer
+				streamsPrepared, gotComplete = false, false
 			}
 		}
 	}
@@ -152,6 +161,17 @@ logged or exposed in error messages.
 All public Node methods are thread-safe and can be called concurrently.
 Channels (Messages, Events) are safe for concurrent reads from a single consumer.
 
+# Important Constants
+
+The handshake stream name is defined in the streams package:
+
+	streams.HandshakeStreamName = "handshake"
+
+Use this constant when sending handshake messages:
+
+	import "github.com/blockberries/glueberry/pkg/streams"
+	node.Send(peerID, streams.HandshakeStreamName, msg)
+
 # Dependencies
 
   - github.com/libp2p/go-libp2p - P2P networking
@@ -160,8 +180,9 @@ Channels (Messages, Events) are safe for concurrent reads from a single consumer
 
 # See Also
 
+  - README.md - Getting started and API reference
   - ARCHITECTURE.md - Detailed architecture and component descriptions
-  - IMPLEMENTATION_PLAN.md - Development roadmap
-  - examples/simple-chat - Working example application
+  - examples/basic - Minimal example
+  - examples/simple-chat - Interactive chat application
 */
 package glueberry

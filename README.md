@@ -277,33 +277,128 @@ cfg := glueberry.NewConfig(
 ## Architecture
 
 ```
-+-------------------------------------------------------------------+
-|                        Application                                 |
-+-------------------------------------------------------------------+
-|                      Glueberry Node                                |
-|  +-------------+  +-------------+  +---------------------------+   |
-|  | AddressBook |  |  Connection |  |    Stream Manager         |   |
-|  |  (JSON)     |  |   Manager   |  | (Encrypted/Unencrypted)   |   |
-|  +-------------+  +-------------+  +---------------------------+   |
-|  +-------------+  +-------------+  +---------------------------+   |
-|  |   Crypto    |  |  Protocol   |  |    Event Dispatcher       |   |
-|  |   Module    |  |   Handlers  |  |                           |   |
-|  +-------------+  +-------------+  +---------------------------+   |
-+-------------------------------------------------------------------+
-|                         libp2p                                     |
-+-------------------------------------------------------------------+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          Application Layer                               │
+│    ┌─────────────────────────────────────────────────────────────────┐   │
+│    │  Peer Discovery    Handshake Protocol    Message Handling        │   │
+│    │  (Your Code)       (Your Code)           (Your Code)             │   │
+│    └─────────────────────────────────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                         Glueberry Node                                   │
+│  ┌───────────────┐  ┌────────────────┐  ┌────────────────────────────┐  │
+│  │  AddressBook  │  │   Connection   │  │     Stream Manager         │  │
+│  │    (JSON)     │  │    Manager     │  │  (Encrypted/Unencrypted)   │  │
+│  │  - CRUD ops   │  │  - State FSM   │  │  - Lazy stream opening     │  │
+│  │  - Blacklist  │  │  - Reconnect   │  │  - ChaCha20-Poly1305       │  │
+│  │  - Persist    │  │  - Timeout     │  │  - Cramberry framing       │  │
+│  └───────────────┘  └────────────────┘  └────────────────────────────┘  │
+│  ┌───────────────┐  ┌────────────────┐  ┌────────────────────────────┐  │
+│  │    Crypto     │  │   Connection   │  │    Event Dispatcher        │  │
+│  │    Module     │  │     Gater      │  │  (Non-blocking events)     │  │
+│  │  - Ed25519    │  │  - Blacklist   │  │                            │  │
+│  │  - X25519     │  │  - Dedup       │  │                            │  │
+│  │  - HKDF       │  │                │  │                            │  │
+│  └───────────────┘  └────────────────┘  └────────────────────────────┘  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                            libp2p                                        │
+│         NAT Traversal • Hole Punching • Relay • Multiplexing             │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Core Data Types
+
+**IncomingMessage** - Received on `Messages()` channel:
+```go
+type IncomingMessage struct {
+    PeerID     peer.ID   // Sender's peer ID
+    StreamName string    // Stream name (e.g., "handshake", "messages")
+    Data       []byte    // Message payload (decrypted if encrypted stream)
+    Timestamp  time.Time // When message was received
+}
+```
+
+**ConnectionEvent** - Received on `Events()` channel:
+```go
+type ConnectionEvent struct {
+    PeerID    peer.ID         // Peer this event relates to
+    State     ConnectionState // New state
+    Error     error           // Non-nil for error conditions
+    Timestamp time.Time       // When event occurred
+}
+```
+
+**PeerEntry** - Peer information from address book:
+```go
+type PeerEntry struct {
+    PeerID      peer.ID              // libp2p peer ID
+    Multiaddrs  []multiaddr.Multiaddr // Network addresses
+    PublicKey   []byte               // Ed25519 public key (after handshake)
+    Metadata    map[string]string    // App-defined metadata
+    LastSeen    time.Time            // Last successful connection
+    Blacklisted bool                 // Blacklist flag
+    CreatedAt   time.Time
+    UpdatedAt   time.Time
+}
 ```
 
 ### Connection Flow
 
-1. **App adds peer** - Address book stores multiaddrs, auto-connects if started
-2. **StateConnected event** - libp2p connected, handshake stream ready, timeout starts
-3. **App sends Hello** - React to StateConnected by sending Hello message
-4. **Receive Hello → Send PubKey** - On receiving Hello, respond with public key
-5. **Receive PubKey → PrepareStreams() + Send Complete** - Prepare streams, signal readiness
-6. **Receive Complete → FinalizeHandshake()** - When peer confirms ready, finalize
-7. **StateEstablished** - Encrypted streams active, timeout cancelled
-8. **App sends/receives** - Messages encrypted transparently
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                       Connection Lifecycle                                │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. AddPeer() or Connect()     ──►  StateConnecting                      │
+│                                          │                               │
+│  2. libp2p connection               ◄────┘                               │
+│     established                      ──►  StateConnected                 │
+│                                          │  • Handshake stream ready     │
+│                                          │  • Timeout starts             │
+│  3. App receives StateConnected event    │                               │
+│     ──► Sends Hello message         ◄────┘                               │
+│                                                                          │
+│  4. Receive Hello ──► Send PubKey                                        │
+│                                                                          │
+│  5. Receive PubKey ──► PrepareStreams() + Send Complete                  │
+│     • Derives shared encryption key (X25519 ECDH + HKDF)                 │
+│     • Registers handlers for encrypted streams                           │
+│     • Node ready to receive encrypted messages                           │
+│                                                                          │
+│  6. Receive Complete ──► FinalizeHandshake()                             │
+│     • Cancels handshake timeout                                          │
+│     • Closes handshake stream                                            │
+│                                      ──►  StateEstablished               │
+│                                          │  • Encrypted streams active   │
+│                                          │  • Streams open lazily        │
+│  7. Send()/Messages() on encrypted streams ◄─┘                           │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Failure Scenarios:**
+- **Handshake timeout** → `StateCooldown` → reconnection with backoff
+- **Connection lost** → `StateDisconnected` → automatic reconnection
+- **Peer blacklisted** → immediate disconnect, no reconnection
+
+### Design Philosophy
+
+**1. Library, Not Application**
+Glueberry is a building block. Peer discovery and handshake protocols are your responsibility. This gives you full control over authentication, versioning, and peer selection.
+
+**2. Symmetric P2P API**
+Both peers use identical code paths. There's no "server" or "client" role - both sides react to messages and events the same way.
+
+**3. Two-Phase Handshake**
+The `PrepareStreams()` + `FinalizeHandshake()` pattern prevents race conditions where one peer sends encrypted messages before the other is ready to decrypt.
+
+**4. Lazy Stream Opening**
+Streams are created on first use (`Send()`), not during `PrepareStreams()`. This reduces resource usage and allows either peer to initiate communication.
+
+**5. Non-Blocking Events**
+Event channels use non-blocking sends. Slow consumers don't block connection operations. Events may be dropped if the channel is full.
+
+**6. Security by Default**
+All post-handshake communication is encrypted. Keys are never logged. Input validation on all network data.
 
 ### Encryption
 
@@ -317,38 +412,52 @@ cfg := glueberry.NewConfig(
 ### Node Methods
 
 **Lifecycle:**
-- `New(cfg) (*Node, error)` - Create node
-- `Start() error` - Start listening and auto-connect to peers
-- `Stop() error` - Graceful shutdown
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `New` | `New(cfg *Config) (*Node, error)` | Create a new node (not started) |
+| `Start` | `Start() error` | Start listening and auto-connect to peers |
+| `Stop` | `Stop() error` | Graceful shutdown and cleanup |
 
 **Information:**
-- `PeerID() peer.ID` - Local peer ID
-- `PublicKey() ed25519.PublicKey` - Local public key
-- `Addrs() []multiaddr.Multiaddr` - Listen addresses
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `PeerID` | `PeerID() peer.ID` | Get local peer ID |
+| `PublicKey` | `PublicKey() ed25519.PublicKey` | Get local Ed25519 public key |
+| `Addrs` | `Addrs() []multiaddr.Multiaddr` | Get listen addresses |
 
 **Address Book:**
-- `AddPeer(peerID, addrs, metadata)` - Add/update peer (auto-connects if started)
-- `RemovePeer(peerID)` - Remove peer
-- `GetPeer(peerID)` - Get peer info
-- `ListPeers()` - List non-blacklisted peers
-- `BlacklistPeer(peerID)` - Blacklist and disconnect
-- `UnblacklistPeer(peerID)` - Remove from blacklist
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `AddPeer` | `AddPeer(peerID, addrs, metadata) error` | Add/update peer (auto-connects if started) |
+| `RemovePeer` | `RemovePeer(peerID) error` | Remove peer from address book |
+| `GetPeer` | `GetPeer(peerID) (*PeerEntry, error)` | Retrieve peer information |
+| `ListPeers` | `ListPeers() []*PeerEntry` | List all non-blacklisted peers |
+| `PeerAddrs` | `PeerAddrs(peerID) []multiaddr.Multiaddr` | Get addresses from peerstore (useful for incoming connections) |
+| `BlacklistPeer` | `BlacklistPeer(peerID) error` | Blacklist peer and disconnect if connected |
+| `UnblacklistPeer` | `UnblacklistPeer(peerID) error` | Remove peer from blacklist |
 
 **Connections:**
-- `Connect(peerID) error` - Explicitly connect to peer
-- `Disconnect(peerID)` - Close connection
-- `ConnectionState(peerID)` - Query state
-- `CancelReconnection(peerID)` - Stop reconnection
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Connect` | `Connect(peerID) error` | Explicitly connect to a peer |
+| `Disconnect` | `Disconnect(peerID) error` | Close connection to peer |
+| `ConnectionState` | `ConnectionState(peerID) ConnectionState` | Query current connection state |
+| `CancelReconnection` | `CancelReconnection(peerID) error` | Stop ongoing reconnection attempts |
 
-**Handshake (Two-Phase):**
-- `PrepareStreams(peerID, pubKey, streamNames)` - Derive shared key, register stream handlers (call on receiving PubKey)
-- `FinalizeHandshake(peerID)` - Cancel timeout, transition to StateEstablished (call on receiving Complete)
-- `CompleteHandshake(peerID, pubKey, streamNames)` - Convenience: calls PrepareStreams + FinalizeHandshake
+**Handshake (Two-Phase API):**
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `PrepareStreams` | `PrepareStreams(peerID, pubKey, streamNames) error` | Derive shared key, register handlers. Call when receiving peer's PubKey. |
+| `FinalizeHandshake` | `FinalizeHandshake(peerID) error` | Cancel timeout, close handshake stream, transition to Established. Call when receiving Complete. |
+| `CompleteHandshake` | `CompleteHandshake(peerID, pubKey, streamNames) error` | Convenience method: PrepareStreams + FinalizeHandshake in one call. |
+| `EstablishEncryptedStreams` | `EstablishEncryptedStreams(peerID, pubKey, streamNames) error` | Legacy method (deprecated, use two-phase API). |
 
 **Messaging:**
-- `Send(peerID, streamName, data)` - Send message (handshake or encrypted)
-- `Messages() <-chan IncomingMessage` - Receive all messages
-- `Events() <-chan ConnectionEvent` - Connection events
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Send` | `Send(peerID, streamName, data) error` | Send data on a stream (handshake or encrypted) |
+| `Messages` | `Messages() <-chan IncomingMessage` | Receive channel for incoming messages |
+| `Events` | `Events() <-chan ConnectionEvent` | Receive channel for connection state events |
 
 ## Connection States
 
@@ -361,14 +470,72 @@ cfg := glueberry.NewConfig(
 | `StateReconnecting` | Attempting reconnection |
 | `StateCooldown` | Waiting after failed handshake |
 
+## Error Handling
+
+Glueberry uses sentinel errors for programmatic error handling:
+
+**Peer/Address Book Errors:**
+- `ErrPeerNotFound` - Peer not in address book
+- `ErrPeerBlacklisted` - Peer is blacklisted
+- `ErrPeerAlreadyExists` - Peer already exists
+
+**Connection Errors:**
+- `ErrNotConnected` - No active connection to peer
+- `ErrAlreadyConnected` - Already connected to peer
+- `ErrConnectionFailed` - Connection attempt failed
+- `ErrHandshakeTimeout` - Handshake didn't complete in time
+- `ErrHandshakeNotComplete` - Encrypted streams requested before handshake
+- `ErrReconnectionCancelled` - Reconnection cancelled by app
+- `ErrInCooldown` - Peer in cooldown after failed handshake
+
+**Stream Errors:**
+- `ErrStreamNotFound` - Stream doesn't exist
+- `ErrStreamClosed` - Stream has been closed
+- `ErrStreamsAlreadyEstablished` - Encrypted streams already set up
+- `ErrNoStreamsRequested` - No stream names provided
+
+**Crypto Errors:**
+- `ErrInvalidPublicKey` - Invalid public key
+- `ErrEncryptionFailed` - Encryption failed
+- `ErrDecryptionFailed` - Decryption failed (tampering or wrong key)
+
+**Node Errors:**
+- `ErrNodeNotStarted` - Node hasn't been started
+- `ErrNodeAlreadyStarted` - Node already running
+
+```go
+// Example error handling
+if err := node.Connect(peerID); err != nil {
+    if errors.Is(err, glueberry.ErrPeerBlacklisted) {
+        log.Printf("Cannot connect: peer is blacklisted")
+    } else if errors.Is(err, glueberry.ErrInCooldown) {
+        log.Printf("Cannot connect: peer in cooldown")
+    }
+}
+```
+
 ## Security Considerations
 
-- **Private Keys:** Never logged or exposed in errors
-- **Shared Secrets:** Derived via ECDH, stored securely in crypto module
-- **Message Authentication:** Poly1305 MAC prevents tampering
-- **Handshake Timeout:** Prevents resource exhaustion attacks
-- **Blacklisting:** Multi-layer enforcement (address book, connection gater, protocol handlers)
-- **Input Validation:** All network data treated as untrusted
+**Key Security:**
+- Private keys never logged or exposed in error messages
+- Shared secrets derived via ECDH, stored only in crypto module
+- Keys deep-copied when accessed to prevent external modification
+
+**Message Security:**
+- ChaCha20-Poly1305 AEAD provides authenticated encryption
+- Poly1305 MAC prevents message tampering
+- Random 96-bit nonces ensure uniqueness (~2^48 messages before collision risk)
+
+**Network Security:**
+- Handshake timeout prevents resource exhaustion attacks
+- Blacklisting enforced at multiple layers (gater, manager, protocol handlers)
+- All network data treated as untrusted and validated
+- Low-order point attack protection in ECDH
+
+**Thread Safety:**
+- All public `Node` methods are thread-safe
+- Internal components use appropriate synchronization (RWMutex, channels)
+- Event and message channels safe for concurrent reads (single consumer recommended)
 
 ## Testing
 
