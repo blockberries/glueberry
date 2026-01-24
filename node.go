@@ -281,6 +281,13 @@ func (n *Node) ListPeers() []*addressbook.PeerEntry {
 	return n.addressBook.ListPeers()
 }
 
+// PeerAddrs returns the known addresses for a peer from libp2p's peerstore.
+// This is useful for getting addresses of peers that connected to us (incoming connections)
+// which may not be in our address book.
+func (n *Node) PeerAddrs(peerID peer.ID) []multiaddr.Multiaddr {
+	return n.host.LibP2PHost().Peerstore().Addrs(peerID)
+}
+
 // Connect establishes a connection to a peer.
 // On success, the connection enters StateConnected and the "handshake" stream becomes available.
 // The application should listen for StateConnected events and perform the handshake
