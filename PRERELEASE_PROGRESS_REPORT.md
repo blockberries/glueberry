@@ -1484,3 +1484,113 @@ zeroed := pool.GetExactBuffer(256)
 5. **Internal package**: Currently an internal utility. Can be exposed as public API if needed by applications.
 
 ---
+
+## Phase: P5-2 - Testing Utilities
+
+**Status**: ✅ Completed
+**Priority**: P2 (Developer Experience)
+
+### Summary
+
+Implemented a MockNode for unit testing applications that use Glueberry. The mock provides a complete simulation of the Node API with helpers for injecting test scenarios.
+
+### Files Created
+
+- `testing/mock.go` - MockNode implementation
+- `testing/mock_test.go` - Comprehensive tests for MockNode
+
+### Key Functionality Implemented
+
+1. **MockNode Type**:
+   - Simulates Glueberry Node API
+   - Thread-safe implementation
+   - Tracks all sent messages for assertions
+
+2. **Core Node Methods**:
+   - `Start()` / `Stop()` - Lifecycle simulation
+   - `AddPeer()` / `RemovePeer()` / `GetPeer()` / `ListPeers()` - Peer management
+   - `BlacklistPeer()` / `UnblacklistPeer()` - Blacklist management
+   - `Connect()` / `ConnectCtx()` / `Disconnect()` - Connection simulation
+   - `Send()` / `SendCtx()` - Message sending with tracking
+   - `Messages()` / `Events()` - Channel access
+
+3. **Test Simulation Helpers**:
+   - `SimulateConnect(peerID, addrs)` - Simulate inbound connection
+   - `SimulateDisconnect(peerID)` - Simulate peer disconnect
+   - `SimulateMessage(peerID, stream, data)` - Simulate incoming message
+   - `SimulateEvent(peerID, state, err)` - Simulate connection event
+
+4. **Error Injection**:
+   - `SetConnectError(err)` - Make Connect return error
+   - `SetSendError(err)` - Make Send return error
+   - `SetDisconnectError(err)` - Make Disconnect return error
+
+5. **Assertions**:
+   - `SentMessages()` - Get all sent messages
+   - `AssertSent(peerID, stream)` - Get messages sent to peer/stream
+   - `AssertNotSent(peerID, stream)` - Assert no messages sent
+   - `ClearSentMessages()` - Clear sent message history
+
+### Test Coverage
+
+Comprehensive tests for all MockNode functionality:
+- Creation and lifecycle
+- Peer management (add, remove, blacklist)
+- Connection simulation
+- Message sending and tracking
+- Error injection
+- Event simulation
+- Reset functionality
+
+All tests pass with race detection enabled.
+
+### Usage Example
+
+```go
+import gtesting "github.com/blockberries/glueberry/testing"
+
+func TestMyApp(t *testing.T) {
+    // Create mock node
+    node := gtesting.NewMockNode()
+    node.Start()
+    defer node.Stop()
+
+    // Simulate a peer connecting
+    peerID := peer.ID("test-peer")
+    node.SimulateConnect(peerID, nil)
+
+    // Run your application code
+    myApp := NewMyApp(node)
+    myApp.HandleConnection(peerID)
+
+    // Verify messages were sent
+    msgs := node.AssertSent(peerID, "mystream")
+    if len(msgs) != 1 {
+        t.Errorf("expected 1 message, got %d", len(msgs))
+    }
+
+    // Simulate receiving a message
+    node.SimulateMessage(peerID, "mystream", []byte("response"))
+
+    // Test error handling
+    node.SetSendError(errors.New("network error"))
+    err := myApp.SendData(peerID, []byte("test"))
+    if err == nil {
+        t.Error("expected error")
+    }
+}
+```
+
+### Design Decisions
+
+1. **Separate testing package**: The mock is in a dedicated `testing` package to avoid polluting the main package and to clearly indicate its purpose.
+
+2. **Channel-based events**: Uses buffered channels for events and messages, matching the real Node API.
+
+3. **Data copying**: All data passed to/from the mock is copied to prevent accidental mutation.
+
+4. **Thread-safe**: All operations are protected by mutexes for safe concurrent use.
+
+5. **Error injection**: Allows testing error handling paths by setting errors that will be returned.
+
+---
