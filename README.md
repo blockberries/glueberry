@@ -308,9 +308,6 @@ cfg := glueberry.NewConfig(
     glueberry.WithMaxMessageSize(512*1024),
     glueberry.WithLogger(myLogger),
     glueberry.WithMetrics(myMetrics),
-    glueberry.WithDecryptionErrorCallback(func(peerID peer.ID, err error) {
-        log.Warn("possible tampering", "peer", peerID)
-    }),
 )
 ```
 
@@ -718,9 +715,32 @@ func TestMyApp(t *testing.T) {
 ## Documentation
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Detailed architecture, component design, and API reference
+- **[ROADMAP.md](ROADMAP.md)** - Future development plans and feature roadmap
 - **[SECURITY_REVIEW.md](SECURITY_REVIEW.md)** - Security audit findings and cryptographic analysis
-- **[PRERELEASE_IMPLEMENTATION_PLAN.md](PRERELEASE_IMPLEMENTATION_PLAN.md)** - Implementation roadmap
-- **[PRERELEASE_PROGRESS_REPORT.md](PRERELEASE_PROGRESS_REPORT.md)** - Development progress and status
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for detailed future plans. Highlights:
+
+**v1.1.0 - Security Hardening** (Q1 2026)
+- Key material memory protection (secure zeroing)
+- Custom decryption error callbacks
+- Connection limits and rate limiting
+
+**v1.2.0 - Observability** (Q2 2026)
+- OpenTelemetry integration
+- Prometheus metrics adapter
+- Health check API
+
+**v1.3.0 - Protocol Enhancements** (Q3 2026)
+- Session resumption for faster reconnects
+- Message priorities and QoS
+- Multicast/broadcast support
+
+**v1.4.0 - Enterprise Features** (Q4 2026)
+- Circuit breaker pattern
+- Graceful degradation
+- Multi-region support
 
 ## License
 

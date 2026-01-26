@@ -926,21 +926,14 @@ if errors.Is(err, &Error{Code: ErrCodeConnectionFailed}) {
 
 3. **No Logging of Secrets**: Private keys, shared secrets, and decrypted messages are never logged, even at debug level.
 
-### Decryption Error Callback
+### Decryption Error Handling
 
-For security observability, applications can register a callback for decryption failures:
+Decryption failures (indicating tampering or corrupted data) are automatically:
+1. Logged via the configured Logger at WARN level
+2. Counted via the Metrics interface (`DecryptionError()`)
+3. The message is silently dropped (not delivered to application)
 
-```go
-cfg := glueberry.NewConfig(
-    privateKey, addressBookPath, listenAddrs,
-    glueberry.WithDecryptionErrorCallback(func(peerID peer.ID, err error) {
-        log.Warn("Decryption failed",
-            "peer", peerID,
-            "error", err)
-        // Could trigger rate limiting, ban, or alert
-    }),
-)
-```
+**Note:** Custom decryption error callbacks are planned for v1.1.0 (see [ROADMAP.md](ROADMAP.md)).
 
 ### ECDH Security
 
@@ -1030,6 +1023,7 @@ Example applications are provided in the `examples/` directory:
 | Example | Description |
 |---------|-------------|
 | `basic/` | Minimal peer-to-peer connection |
+| `simple-chat/` | Interactive chat between two peers |
 | `file-transfer/` | Chunked file transfer with progress |
 | `rpc/` | Request-response RPC pattern |
 | `cluster/` | Multi-node cluster mesh |
