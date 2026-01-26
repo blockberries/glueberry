@@ -54,6 +54,9 @@ const (
 
 	// ErrCodeNodeAlreadyStarted indicates the node is already running.
 	ErrCodeNodeAlreadyStarted
+
+	// ErrCodeVersionMismatch indicates incompatible protocol versions.
+	ErrCodeVersionMismatch
 )
 
 // String returns a human-readable name for the error code.
@@ -87,6 +90,8 @@ func (c ErrorCode) String() string {
 		return "NodeNotStarted"
 	case ErrCodeNodeAlreadyStarted:
 		return "NodeAlreadyStarted"
+	case ErrCodeVersionMismatch:
+		return "VersionMismatch"
 	default:
 		return fmt.Sprintf("ErrorCode(%d)", c)
 	}
@@ -280,6 +285,12 @@ var (
 
 	// ErrMissingListenAddrs indicates no listen addresses were provided.
 	ErrMissingListenAddrs = errors.New("at least one listen address is required")
+)
+
+// Sentinel errors for protocol versioning.
+var (
+	// ErrVersionMismatch indicates incompatible protocol versions.
+	ErrVersionMismatch = errors.New("incompatible protocol version")
 )
 
 // Sentinel errors for node operations.

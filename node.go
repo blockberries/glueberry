@@ -35,9 +35,14 @@ type Node struct {
 	eventDispatch *eventdispatch.Dispatcher
 
 	// Channels
-	events       <-chan eventdispatch.ConnectionEvent
-	internalMsgs chan streams.IncomingMessage // internal channel from stream manager
-	messages     chan streams.IncomingMessage // external channel for application
+	internalEvents <-chan eventdispatch.ConnectionEvent // from dispatcher
+	events         chan ConnectionEvent                 // external channel for application
+	internalMsgs   chan streams.IncomingMessage         // internal channel from stream manager
+	messages       chan streams.IncomingMessage         // external channel for application
+
+	// Event subscribers for filtered events
+	eventSubs   []chan ConnectionEvent
+	eventSubsMu sync.RWMutex
 
 	// Stats tracking
 	peerStats   map[peer.ID]*PeerStatsTracker
@@ -79,6 +84,9 @@ func New(cfg *Config) (*Node, error) {
 
 	// Create event dispatcher
 	dispatcher := eventdispatch.NewDispatcher(cfg.EventBufferSize)
+
+	// Create event channels - internal from dispatcher, external for application
+	externalEventsChan := make(chan ConnectionEvent, cfg.EventBufferSize)
 
 	// Create message channels - internal for stream manager, external for application
 	internalMsgsChan := make(chan streams.IncomingMessage, cfg.MessageBufferSize)
@@ -131,26 +139,28 @@ func New(cfg *Config) (*Node, error) {
 	gater.SetStateChecker(connMgr)
 
 	node := &Node{
-		config:        cfg,
-		logger:        cfg.Logger,
-		metrics:       cfg.Metrics,
-		crypto:        cryptoModule,
-		addressBook:   addrBook,
-		host:          libp2pHost,
-		connections:   connMgr,
-		streamManager: streamMgr,
-		eventDispatch: dispatcher,
-		events:        dispatcher.Events(),
-		internalMsgs:  internalMsgsChan,
-		messages:      externalMsgsChan,
-		peerStats:     make(map[peer.ID]*PeerStatsTracker),
-		ctx:           ctx,
-		cancel:        cancel,
-		started:       false,
+		config:         cfg,
+		logger:         cfg.Logger,
+		metrics:        cfg.Metrics,
+		crypto:         cryptoModule,
+		addressBook:    addrBook,
+		host:           libp2pHost,
+		connections:    connMgr,
+		streamManager:  streamMgr,
+		eventDispatch:  dispatcher,
+		internalEvents: dispatcher.Events(),
+		events:         externalEventsChan,
+		internalMsgs:   internalMsgsChan,
+		messages:       externalMsgsChan,
+		peerStats:      make(map[peer.ID]*PeerStatsTracker),
+		ctx:            ctx,
+		cancel:         cancel,
+		started:        false,
 	}
 
-	// Start message forwarding goroutine that records stats
+	// Start forwarding goroutines
 	go node.forwardMessagesWithStats()
+	go node.forwardEvents()
 
 	return node, nil
 }
@@ -265,6 +275,12 @@ func (n *Node) PublicKey() ed25519.PublicKey {
 // Addrs returns the multiaddresses the node is listening on.
 func (n *Node) Addrs() []multiaddr.Multiaddr {
 	return n.host.Addrs()
+}
+
+// Version returns the Glueberry protocol version.
+// Applications should exchange versions during handshake to verify compatibility.
+func (n *Node) Version() ProtocolVersion {
+	return CurrentVersion()
 }
 
 // AddPeer adds a peer to the address book.
@@ -605,23 +621,9 @@ func (n *Node) Messages() <-chan streams.IncomingMessage {
 
 // Events returns the channel for receiving connection events.
 // The application should read from this channel to receive state change notifications.
+// This channel is shared - all consumers receive all events.
 func (n *Node) Events() <-chan ConnectionEvent {
-	// Create a conversion goroutine to convert internal events to public events
-	publicEvents := make(chan ConnectionEvent, cap(n.messages))
-
-	go func() {
-		for evt := range n.events {
-			publicEvents <- ConnectionEvent{
-				PeerID:    evt.PeerID,
-				State:     ConnectionState(evt.State),
-				Error:     evt.Error,
-				Timestamp: evt.Timestamp,
-			}
-		}
-		close(publicEvents)
-	}()
-
-	return publicEvents
+	return n.events
 }
 
 // PeerStatistics returns statistics for a specific peer.
@@ -702,4 +704,154 @@ func (n *Node) forwardMessagesWithStats() {
 			}
 		}
 	}
+}
+
+// forwardEvents reads from internal events channel and broadcasts
+// to the main events channel and all subscribers.
+func (n *Node) forwardEvents() {
+	defer func() {
+		close(n.events)
+		// Close all subscriber channels
+		n.eventSubsMu.Lock()
+		for _, ch := range n.eventSubs {
+			close(ch)
+		}
+		n.eventSubs = nil
+		n.eventSubsMu.Unlock()
+	}()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case evt, ok := <-n.internalEvents:
+			if !ok {
+				return
+			}
+
+			// Convert to public event type
+			pubEvt := ConnectionEvent{
+				PeerID:    evt.PeerID,
+				State:     ConnectionState(evt.State),
+				Error:     evt.Error,
+				Timestamp: evt.Timestamp,
+			}
+
+			// Forward to main events channel (non-blocking)
+			select {
+			case n.events <- pubEvt:
+				// Event delivered
+			default:
+				// Channel full - drop event
+				if n.metrics != nil {
+					n.metrics.EventDropped()
+				}
+			}
+
+			// Forward to all subscribers (non-blocking)
+			n.eventSubsMu.RLock()
+			for _, ch := range n.eventSubs {
+				select {
+				case ch <- pubEvt:
+					// Event delivered
+				default:
+					// Subscriber full - drop event for this subscriber
+				}
+			}
+			n.eventSubsMu.RUnlock()
+		}
+	}
+}
+
+// subscribeEvents creates a new event subscriber channel.
+func (n *Node) subscribeEvents() chan ConnectionEvent {
+	ch := make(chan ConnectionEvent, n.config.EventBufferSize)
+	n.eventSubsMu.Lock()
+	n.eventSubs = append(n.eventSubs, ch)
+	n.eventSubsMu.Unlock()
+	return ch
+}
+
+// EventFilter specifies which events to receive.
+// Nil slices match all values for that field.
+type EventFilter struct {
+	// PeerIDs filters events to only these peers. Nil means all peers.
+	PeerIDs []peer.ID
+
+	// States filters events to only these states. Nil means all states.
+	States []ConnectionState
+}
+
+// matches returns true if the event matches this filter.
+func (f EventFilter) matches(evt ConnectionEvent) bool {
+	// Check peer filter
+	if len(f.PeerIDs) > 0 {
+		found := false
+		for _, pid := range f.PeerIDs {
+			if pid == evt.PeerID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	// Check state filter
+	if len(f.States) > 0 {
+		found := false
+		for _, s := range f.States {
+			if s == evt.State {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	return true
+}
+
+// FilteredEvents returns a channel that receives only events matching the filter.
+// The returned channel is closed when the node is stopped.
+//
+// This method creates a new subscriber that receives a copy of all events,
+// so it can be used together with Events() without conflict. Each call to
+// FilteredEvents creates a new subscription.
+func (n *Node) FilteredEvents(filter EventFilter) <-chan ConnectionEvent {
+	filtered := make(chan ConnectionEvent, n.config.EventBufferSize)
+
+	// Subscribe to receive all events
+	subscription := n.subscribeEvents()
+
+	go func() {
+		defer close(filtered)
+		for evt := range subscription {
+			if filter.matches(evt) {
+				select {
+				case filtered <- evt:
+					// Event delivered
+				default:
+					// Channel full - drop event
+				}
+			}
+		}
+	}()
+
+	return filtered
+}
+
+// EventsForPeer returns a channel that receives events only for the specified peer.
+// This is a convenience wrapper around FilteredEvents.
+func (n *Node) EventsForPeer(peerID peer.ID) <-chan ConnectionEvent {
+	return n.FilteredEvents(EventFilter{PeerIDs: []peer.ID{peerID}})
+}
+
+// EventsForStates returns a channel that receives events only for the specified states.
+// This is a convenience wrapper around FilteredEvents.
+func (n *Node) EventsForStates(states ...ConnectionState) <-chan ConnectionEvent {
+	return n.FilteredEvents(EventFilter{States: states})
 }

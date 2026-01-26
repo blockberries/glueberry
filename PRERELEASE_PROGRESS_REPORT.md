@@ -736,3 +736,210 @@ for peerID, stats := range allStats {
 4. **Non-blocking message forwarding**: If the external channel is full, messages are dropped to prevent blocking the stats collection. This matches the existing behavior elsewhere in the codebase.
 
 ---
+
+## Phase: P2-2 - Event Filtering
+
+**Status**: ✅ Completed
+**Priority**: P1 (Production Readiness)
+
+### Summary
+
+Implemented event filtering to allow applications to receive only specific events they care about. The implementation uses a pub-sub pattern with broadcast support, allowing multiple consumers to receive events without conflict.
+
+### Files Modified
+
+- `node.go`:
+  - Added `eventSubs` slice and mutex for subscriber management
+  - Added `internalEvents` field for internal event channel
+  - Refactored `forwardEvents()` to broadcast to all subscribers
+  - Added `subscribeEvents()` internal method
+  - Added `EventFilter` type with peer and state filtering
+  - Added `FilteredEvents(filter EventFilter)` method
+  - Added `EventsForPeer(peerID)` convenience method
+  - Added `EventsForStates(states...)` convenience method
+  - Fixed `Events()` to use pre-created external channel
+
+- `events_filter_test.go` (new):
+  - Tests for EventFilter.matches() with all filters
+  - Tests for peer, state, and combined filtering
+  - Tests for ConnectionEvent fields
+
+### Key Functionality Implemented
+
+1. **EventFilter struct**:
+   - `PeerIDs []peer.ID` - Filter by specific peers (nil = all)
+   - `States []ConnectionState` - Filter by specific states (nil = all)
+   - `matches(evt)` method for filter evaluation
+
+2. **Event subscription mechanism**:
+   - Broadcast pattern: events sent to all subscribers
+   - Main `Events()` channel and filtered subscribers receive same events
+   - No conflict between `Events()` and `FilteredEvents()`
+
+3. **Public API**:
+   - `Events() <-chan ConnectionEvent` - All events
+   - `FilteredEvents(filter EventFilter) <-chan ConnectionEvent` - Filtered events
+   - `EventsForPeer(peerID peer.ID) <-chan ConnectionEvent` - Events for one peer
+   - `EventsForStates(states ...ConnectionState) <-chan ConnectionEvent` - Events for specific states
+
+### Test Coverage
+
+- `TestEventFilter_Matches_AllEvents` - Empty filter matches all
+- `TestEventFilter_Matches_PeerFilter` - Peer ID filtering
+- `TestEventFilter_Matches_StateFilter` - Connection state filtering
+- `TestEventFilter_Matches_CombinedFilter` - Combined peer and state filtering
+- `TestConnectionEvent_Fields` - Event struct verification
+- `TestConnectionState_StringInFilter` - State string representation
+
+All tests pass with race detection enabled.
+
+### Usage Example
+
+```go
+// Get all events
+allEvents := node.Events()
+go func() {
+    for evt := range allEvents {
+        log.Printf("Event: %s -> %s", evt.PeerID, evt.State)
+    }
+}()
+
+// Get filtered events for specific peer
+peerEvents := node.EventsForPeer(targetPeerID)
+go func() {
+    for evt := range peerEvents {
+        log.Printf("Peer %s: %s", evt.PeerID, evt.State)
+    }
+}()
+
+// Get events for specific states
+connectEvents := node.EventsForStates(StateConnected, StateEstablished)
+go func() {
+    for evt := range connectEvents {
+        log.Printf("Connection event: %s", evt.State)
+    }
+}()
+
+// Custom filter - specific peers in specific states
+filter := EventFilter{
+    PeerIDs: []peer.ID{peer1, peer2},
+    States:  []ConnectionState{StateEstablished},
+}
+filtered := node.FilteredEvents(filter)
+```
+
+### Design Decisions
+
+1. **Broadcast pattern**: All event subscribers receive all events (independently filtered). This allows using both `Events()` and `FilteredEvents()` without conflict.
+
+2. **Non-blocking delivery**: If a subscriber's channel is full, events are dropped for that subscriber. This prevents slow consumers from blocking the event system.
+
+3. **Subscriber cleanup**: All subscriber channels are closed when the node stops, ensuring goroutines don't leak.
+
+4. **Filter composition**: Filters use AND logic - events must match both peer and state filters if both are specified. Empty filter slices match all.
+
+---
+
+## Phase: P3-1 - Protocol Versioning
+
+**Status**: ✅ Completed
+**Priority**: P1 (Production Readiness)
+
+### Summary
+
+Implemented protocol versioning support to allow applications to detect incompatible peers early during handshake. The implementation uses semantic versioning (major.minor.patch) with well-defined compatibility rules.
+
+### Files Created
+
+- `version.go` - ProtocolVersion type and version constants
+- `version_test.go` - Comprehensive tests for version functionality
+
+### Files Modified
+
+- `errors.go`:
+  - Added `ErrCodeVersionMismatch` error code
+  - Added `ErrVersionMismatch` sentinel error
+
+- `node.go`:
+  - Added `Version() ProtocolVersion` public API method
+
+### Key Functionality Implemented
+
+1. **Protocol version constants**:
+   - `ProtocolVersionMajor` = 1 (breaking changes)
+   - `ProtocolVersionMinor` = 0 (new features)
+   - `ProtocolVersionPatch` = 0 (bug fixes)
+
+2. **ProtocolVersion struct**:
+   - `Major uint8` - Breaking changes require matching major
+   - `Minor uint8` - New features; backwards compatible within major
+   - `Patch uint8` - Bug fixes; always compatible within major.minor
+
+3. **Version methods**:
+   - `String()` - Returns "major.minor.patch" format
+   - `Compatible(other)` - Checks compatibility with another version
+   - `IsNewer(other)` - Checks if this version is newer
+   - `Equal(other)` - Checks exact equality
+
+4. **Compatibility rules**:
+   - Major versions must match
+   - Peer's minor version must not exceed ours (they can't use features we don't have)
+   - Patch versions are always compatible within same major.minor
+
+5. **Utility functions**:
+   - `CurrentVersion()` - Returns current protocol version
+   - `ParseVersion(s string)` - Parses "major.minor.patch" string
+
+6. **Public API**:
+   - `node.Version() ProtocolVersion` - Get current protocol version
+
+### Test Coverage
+
+- `TestProtocolVersion_String` - String formatting
+- `TestProtocolVersion_Compatible` - All compatibility scenarios:
+  - Same version (compatible)
+  - Same with patch difference (compatible)
+  - Older minor version (compatible)
+  - Newer minor version (NOT compatible)
+  - Different major version (NOT compatible)
+- `TestProtocolVersion_IsNewer` - Version comparison
+- `TestProtocolVersion_Equal` - Exact equality
+- `TestParseVersion` - String parsing with edge cases
+- `TestCurrentVersion` - Constants verification
+- `TestErrCodeVersionMismatch` - Error code string
+
+All tests pass with race detection enabled.
+
+### Usage Example
+
+```go
+// Get current version
+version := node.Version()
+fmt.Printf("Running Glueberry protocol %s\n", version.String())
+
+// During handshake, exchange and check versions
+myVersion := glueberry.CurrentVersion()
+// ... send myVersion to peer, receive peerVersion ...
+
+if !myVersion.Compatible(peerVersion) {
+    return glueberry.ErrVersionMismatch
+}
+
+// Parse version from string (e.g., from config or header)
+v, err := glueberry.ParseVersion("1.2.3")
+if err != nil {
+    return fmt.Errorf("invalid version: %w", err)
+}
+```
+
+### Design Decisions
+
+1. **Semantic versioning**: Following standard semver conventions makes compatibility rules intuitive and familiar to developers.
+
+2. **Minor version compatibility**: We can communicate with peers that have OLDER minor versions (they're using a subset of our features), but NOT with peers that have NEWER minor versions (they might use features we don't support).
+
+3. **uint8 for version numbers**: Protocol versions don't need to exceed 255. Using uint8 saves bytes in wire format and makes the version fit in 3 bytes.
+
+4. **Application-level checking**: The library provides the tools but doesn't enforce version checking. Applications can decide whether to reject connections, warn, or accept incompatible versions.
+
+---
