@@ -16,6 +16,10 @@ type StreamOpener interface {
 	NewStream(ctx context.Context, peerID peer.ID, streamName string) (network.Stream, error)
 }
 
+// DecryptionErrorCallback is called when a decryption error occurs.
+// It receives the peer ID and the error for logging/metrics purposes.
+type DecryptionErrorCallback func(peerID peer.ID, err error)
+
 // Manager manages encrypted and unencrypted streams for all connected peers.
 // All public methods are thread-safe.
 type Manager struct {
@@ -31,6 +35,9 @@ type Manager struct {
 
 	// sharedKeys stores the encryption key for each peer
 	sharedKeys map[peer.ID][]byte
+
+	// onDecryptionError is called when a decryption error occurs (optional)
+	onDecryptionError DecryptionErrorCallback
 
 	mu sync.RWMutex
 
@@ -59,6 +66,14 @@ func NewManager(
 		ctx:                managerCtx,
 		cancel:             cancel,
 	}
+}
+
+// SetDecryptionErrorCallback sets a callback function that is called when a decryption
+// error occurs. This is useful for logging and metrics.
+func (m *Manager) SetDecryptionErrorCallback(callback DecryptionErrorCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onDecryptionError = callback
 }
 
 // EstablishStreams registers the shared key and allowed stream names for a peer.
@@ -105,9 +120,24 @@ func (m *Manager) EstablishStreams(
 // If the stream doesn't exist, it is opened lazily.
 // The "handshake" stream is unencrypted; all other streams are encrypted.
 func (m *Manager) Send(peerID peer.ID, streamName string, data []byte) error {
+	return m.SendCtx(context.Background(), peerID, streamName, data)
+}
+
+// SendCtx sends data over a stream to a peer with context support for cancellation.
+// If the stream doesn't exist, it is opened lazily.
+// The "handshake" stream is unencrypted; all other streams are encrypted.
+// The provided context can be used to cancel the send operation or set a timeout.
+func (m *Manager) SendCtx(ctx context.Context, peerID peer.ID, streamName string, data []byte) error {
+	// Check context before starting
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	// Route handshake stream to unencrypted path
 	if streamName == HandshakeStreamName {
-		return m.sendUnencrypted(peerID, streamName, data)
+		return m.sendUnencryptedCtx(ctx, peerID, streamName, data)
 	}
 
 	// First try to get existing encrypted stream
@@ -121,20 +151,27 @@ func (m *Manager) Send(peerID peer.ID, streamName string, data []byte) error {
 
 	// If stream exists and is not closed, use it
 	if stream != nil && !stream.IsClosed() {
-		return stream.Send(data)
+		return stream.SendCtx(ctx, data)
 	}
 
 	// Stream doesn't exist or is closed - open it lazily
-	stream, err := m.openStreamLazily(peerID, streamName)
+	stream, err := m.openStreamLazilyCtx(ctx, peerID, streamName)
 	if err != nil {
 		return err
 	}
 
-	return stream.Send(data)
+	return stream.SendCtx(ctx, data)
 }
 
-// sendUnencrypted sends data over an unencrypted stream.
-func (m *Manager) sendUnencrypted(peerID peer.ID, streamName string, data []byte) error {
+// sendUnencryptedCtx sends data over an unencrypted stream with context support.
+func (m *Manager) sendUnencryptedCtx(ctx context.Context, peerID peer.ID, streamName string, data []byte) error {
+	// Check context before starting
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	// First try to get existing stream
 	m.mu.RLock()
 	peerStreams, hasPeerStreams := m.unencryptedStreams[peerID]
@@ -146,20 +183,27 @@ func (m *Manager) sendUnencrypted(peerID peer.ID, streamName string, data []byte
 
 	// If stream exists and is not closed, use it
 	if stream != nil && !stream.IsClosed() {
-		return stream.Send(data)
+		return stream.SendCtx(ctx, data)
 	}
 
 	// Stream doesn't exist or is closed - open it lazily
-	stream, err := m.openUnencryptedStreamLazily(peerID, streamName)
+	stream, err := m.openUnencryptedStreamLazilyCtx(ctx, peerID, streamName)
 	if err != nil {
 		return err
 	}
 
-	return stream.Send(data)
+	return stream.SendCtx(ctx, data)
 }
 
-// openUnencryptedStreamLazily opens an unencrypted stream on-demand.
-func (m *Manager) openUnencryptedStreamLazily(peerID peer.ID, streamName string) (*UnencryptedStream, error) {
+// openUnencryptedStreamLazilyCtx opens an unencrypted stream on-demand with context support.
+func (m *Manager) openUnencryptedStreamLazilyCtx(ctx context.Context, peerID peer.ID, streamName string) (*UnencryptedStream, error) {
+	// Check context before acquiring lock
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -170,8 +214,15 @@ func (m *Manager) openUnencryptedStreamLazily(peerID peer.ID, streamName string)
 		}
 	}
 
-	// Open libp2p stream
-	rawStream, err := m.host.NewStream(m.ctx, peerID, streamName)
+	// Check context again after acquiring lock
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Open libp2p stream using the provided context
+	rawStream, err := m.host.NewStream(ctx, peerID, streamName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open stream %q: %w", streamName, err)
 	}
@@ -194,8 +245,15 @@ func (m *Manager) openUnencryptedStreamLazily(peerID peer.ID, streamName string)
 	return unencStream, nil
 }
 
-// openStreamLazily opens a stream on-demand.
-func (m *Manager) openStreamLazily(peerID peer.ID, streamName string) (*EncryptedStream, error) {
+// openStreamLazilyCtx opens a stream on-demand with context support.
+func (m *Manager) openStreamLazilyCtx(ctx context.Context, peerID peer.ID, streamName string) (*EncryptedStream, error) {
+	// Check context before acquiring lock
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -217,13 +275,20 @@ func (m *Manager) openStreamLazily(peerID peer.ID, streamName string) (*Encrypte
 		return nil, fmt.Errorf("no shared key for peer %s (call EstablishStreams first)", peerID)
 	}
 
-	// Open libp2p stream
-	rawStream, err := m.host.NewStream(m.ctx, peerID, streamName)
+	// Check context again after acquiring lock
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Open libp2p stream using the provided context
+	rawStream, err := m.host.NewStream(ctx, peerID, streamName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open stream %q: %w", streamName, err)
 	}
 
-	// Create encrypted stream
+	// Create encrypted stream with decryption error callback
 	encStream, err := NewEncryptedStream(
 		m.ctx,
 		streamName,
@@ -231,6 +296,7 @@ func (m *Manager) openStreamLazily(peerID peer.ID, streamName string) (*Encrypte
 		rawStream,
 		sharedKey,
 		m.incoming,
+		m.onDecryptionError,
 	)
 	if err != nil {
 		rawStream.Close()
@@ -446,6 +512,7 @@ func (m *Manager) HandleIncomingStream(
 		stream,
 		sharedKey,
 		m.incoming,
+		m.onDecryptionError,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create encrypted stream: %w", err)

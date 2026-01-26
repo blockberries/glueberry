@@ -2,7 +2,199 @@
 // with encrypted, multiplexed streams and app-controlled handshaking.
 package glueberry
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+)
+
+// ErrorCode identifies the type of error for programmatic handling.
+type ErrorCode int
+
+const (
+	// ErrCodeUnknown indicates an unknown or unclassified error.
+	ErrCodeUnknown ErrorCode = iota
+
+	// ErrCodeConnectionFailed indicates a connection attempt failed.
+	ErrCodeConnectionFailed
+
+	// ErrCodeHandshakeFailed indicates the handshake failed.
+	ErrCodeHandshakeFailed
+
+	// ErrCodeHandshakeTimeout indicates the handshake did not complete in time.
+	ErrCodeHandshakeTimeout
+
+	// ErrCodeStreamClosed indicates the stream has been closed.
+	ErrCodeStreamClosed
+
+	// ErrCodeEncryptionFailed indicates message encryption failed.
+	ErrCodeEncryptionFailed
+
+	// ErrCodeDecryptionFailed indicates message decryption failed.
+	ErrCodeDecryptionFailed
+
+	// ErrCodePeerNotFound indicates the peer was not found.
+	ErrCodePeerNotFound
+
+	// ErrCodePeerBlacklisted indicates the peer is blacklisted.
+	ErrCodePeerBlacklisted
+
+	// ErrCodeBufferFull indicates a buffer (event or message) is full.
+	ErrCodeBufferFull
+
+	// ErrCodeContextCanceled indicates the operation was cancelled via context.
+	ErrCodeContextCanceled
+
+	// ErrCodeInvalidConfig indicates the configuration is invalid.
+	ErrCodeInvalidConfig
+
+	// ErrCodeNodeNotStarted indicates the node has not been started.
+	ErrCodeNodeNotStarted
+
+	// ErrCodeNodeAlreadyStarted indicates the node is already running.
+	ErrCodeNodeAlreadyStarted
+)
+
+// String returns a human-readable name for the error code.
+func (c ErrorCode) String() string {
+	switch c {
+	case ErrCodeUnknown:
+		return "Unknown"
+	case ErrCodeConnectionFailed:
+		return "ConnectionFailed"
+	case ErrCodeHandshakeFailed:
+		return "HandshakeFailed"
+	case ErrCodeHandshakeTimeout:
+		return "HandshakeTimeout"
+	case ErrCodeStreamClosed:
+		return "StreamClosed"
+	case ErrCodeEncryptionFailed:
+		return "EncryptionFailed"
+	case ErrCodeDecryptionFailed:
+		return "DecryptionFailed"
+	case ErrCodePeerNotFound:
+		return "PeerNotFound"
+	case ErrCodePeerBlacklisted:
+		return "PeerBlacklisted"
+	case ErrCodeBufferFull:
+		return "BufferFull"
+	case ErrCodeContextCanceled:
+		return "ContextCanceled"
+	case ErrCodeInvalidConfig:
+		return "InvalidConfig"
+	case ErrCodeNodeNotStarted:
+		return "NodeNotStarted"
+	case ErrCodeNodeAlreadyStarted:
+		return "NodeAlreadyStarted"
+	default:
+		return fmt.Sprintf("ErrorCode(%d)", c)
+	}
+}
+
+// Error represents a Glueberry error with rich context.
+// It provides structured information for programmatic error handling.
+type Error struct {
+	// Code identifies the type of error.
+	Code ErrorCode
+
+	// Message is a human-readable description of the error.
+	Message string
+
+	// PeerID is the peer associated with the error, if any.
+	PeerID peer.ID
+
+	// Stream is the stream name associated with the error, if any.
+	Stream string
+
+	// Cause is the underlying error, if any.
+	Cause error
+
+	// Retriable indicates whether the operation can be retried.
+	Retriable bool
+}
+
+// Error returns a human-readable error message.
+func (e *Error) Error() string {
+	if e.Cause != nil {
+		return fmt.Sprintf("glueberry: %s: %v", e.Message, e.Cause)
+	}
+	return fmt.Sprintf("glueberry: %s", e.Message)
+}
+
+// Unwrap returns the underlying error.
+func (e *Error) Unwrap() error {
+	return e.Cause
+}
+
+// Is reports whether target matches this error.
+// Two Glueberry errors are considered equal if they have the same error code.
+func (e *Error) Is(target error) bool {
+	t, ok := target.(*Error)
+	if !ok {
+		return false
+	}
+	return t.Code == e.Code
+}
+
+// IsRetriable returns true if the error indicates a retriable operation.
+// This checks if the error is a Glueberry Error with Retriable set to true.
+func IsRetriable(err error) bool {
+	var gErr *Error
+	if errors.As(err, &gErr) {
+		return gErr.Retriable
+	}
+	return false
+}
+
+// IsPermanent returns true if the error indicates a permanent failure.
+// Permanent failures should not be retried.
+func IsPermanent(err error) bool {
+	var gErr *Error
+	if errors.As(err, &gErr) {
+		switch gErr.Code {
+		case ErrCodePeerBlacklisted, ErrCodeInvalidConfig:
+			return true
+		}
+	}
+	return false
+}
+
+// NewError creates a new Glueberry Error with the given code and message.
+func NewError(code ErrorCode, message string) *Error {
+	return &Error{
+		Code:    code,
+		Message: message,
+	}
+}
+
+// NewErrorWithCause creates a new Glueberry Error with the given code, message, and cause.
+func NewErrorWithCause(code ErrorCode, message string, cause error) *Error {
+	return &Error{
+		Code:    code,
+		Message: message,
+		Cause:   cause,
+	}
+}
+
+// NewPeerError creates a new Glueberry Error associated with a specific peer.
+func NewPeerError(code ErrorCode, message string, peerID peer.ID) *Error {
+	return &Error{
+		Code:    code,
+		Message: message,
+		PeerID:  peerID,
+	}
+}
+
+// NewStreamError creates a new Glueberry Error associated with a specific stream.
+func NewStreamError(code ErrorCode, message string, peerID peer.ID, stream string) *Error {
+	return &Error{
+		Code:    code,
+		Message: message,
+		PeerID:  peerID,
+		Stream:  stream,
+	}
+}
 
 // Sentinel errors for peer and address book operations.
 var (

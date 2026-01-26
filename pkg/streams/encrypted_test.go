@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,13 +66,13 @@ func TestEncryptedStream_Send(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 10)
 
-	sender, err := NewEncryptedStream(ctx, "test", peerID, stream1, key1, incoming)
+	sender, err := NewEncryptedStream(ctx, "test", peerID, stream1, key1, incoming, nil)
 	if err != nil {
 		t.Fatalf("NewEncryptedStream failed: %v", err)
 	}
 	defer sender.Close()
 
-	receiver, err := NewEncryptedStream(ctx, "test", peerID, stream2, key2, incoming)
+	receiver, err := NewEncryptedStream(ctx, "test", peerID, stream2, key2, incoming, nil)
 	if err != nil {
 		t.Fatalf("NewEncryptedStream failed: %v", err)
 	}
@@ -123,10 +124,10 @@ func TestEncryptedStream_MultipleMessages(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 10)
 
-	sender, _ := NewEncryptedStream(ctx, "test", peerID, stream1, key1, incoming)
+	sender, _ := NewEncryptedStream(ctx, "test", peerID, stream1, key1, incoming, nil)
 	defer sender.Close()
 
-	receiver, _ := NewEncryptedStream(ctx, "test", peerID, stream2, key1, incoming)
+	receiver, _ := NewEncryptedStream(ctx, "test", peerID, stream2, key1, incoming, nil)
 	defer receiver.Close()
 
 	// Send multiple messages
@@ -170,7 +171,7 @@ func TestEncryptedStream_Close(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 10)
 
-	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming)
+	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming, nil)
 
 	err := es.Close()
 	if err != nil {
@@ -202,7 +203,7 @@ func TestEncryptedStream_Name(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 10)
 
-	es, _ := NewEncryptedStream(ctx, "my-stream", peerID, stream, key, incoming)
+	es, _ := NewEncryptedStream(ctx, "my-stream", peerID, stream, key, incoming, nil)
 	defer es.Close()
 
 	if es.Name() != "my-stream" {
@@ -229,7 +230,7 @@ func TestEncryptedStream_ConcurrentSend(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 100)
 
-	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming)
+	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming, nil)
 	defer es.Close()
 
 	// Send from multiple goroutines
@@ -269,7 +270,7 @@ func TestEncryptedStream_ReadLoopEOF(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 10)
 
-	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming)
+	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming, nil)
 
 	// Wait a bit for read loop to encounter EOF
 	time.Sleep(50 * time.Millisecond)
@@ -279,5 +280,92 @@ func TestEncryptedStream_ReadLoopEOF(t *testing.T) {
 		// This might not be closed yet, which is fine
 		// The important thing is no panic occurred
 		t.Logf("Stream not yet closed after EOF, this is acceptable")
+	}
+}
+
+func TestEncryptedStream_DecryptionErrorCallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create different keys for sender and receiver to cause decryption failure
+	priv1 := generateTestKey(t)
+	priv2 := generateTestKey(t)
+	priv3 := generateTestKey(t) // Third key for receiver - will cause decryption failure
+
+	mod1, _ := crypto.NewModule(priv1)
+	mod2, _ := crypto.NewModule(priv2)
+	mod3, _ := crypto.NewModule(priv3)
+
+	// Sender derives key from peer 2's public key
+	senderKey, _ := mod1.DeriveSharedKey(mod2.Ed25519PublicKey())
+
+	// Receiver uses DIFFERENT key (derived from peer 3's public key)
+	// This will cause decryption to fail
+	receiverKey, _ := mod2.DeriveSharedKey(mod3.Ed25519PublicKey())
+
+	// Create pipes for bidirectional communication
+	r1, w1 := io.Pipe()
+	r2, w2 := io.Pipe()
+
+	stream1 := newMockStream(r2, w1)
+	stream2 := newMockStream(r1, w2)
+
+	peerID := mustParsePeerID(t, testPeerIDStr)
+	incoming := make(chan IncomingMessage, 10)
+
+	// Track callback invocations
+	var callbackMu sync.Mutex
+	var callbackInvoked bool
+	var callbackPeerID peer.ID
+	var callbackErr error
+
+	errorCallback := func(pid peer.ID, err error) {
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		callbackInvoked = true
+		callbackPeerID = pid
+		callbackErr = err
+	}
+
+	sender, err := NewEncryptedStream(ctx, "test", peerID, stream1, senderKey, incoming, nil)
+	if err != nil {
+		t.Fatalf("NewEncryptedStream for sender failed: %v", err)
+	}
+	defer sender.Close()
+
+	receiver, err := NewEncryptedStream(ctx, "test", peerID, stream2, receiverKey, incoming, errorCallback)
+	if err != nil {
+		t.Fatalf("NewEncryptedStream for receiver failed: %v", err)
+	}
+	defer receiver.Close()
+
+	// Send a message (will be encrypted with sender's key)
+	err = sender.Send([]byte("test message"))
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	// Wait for decryption attempt
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify callback was invoked
+	callbackMu.Lock()
+	if !callbackInvoked {
+		t.Error("decryption error callback was not invoked")
+	}
+	if callbackPeerID != peerID {
+		t.Errorf("callback peerID = %v, want %v", callbackPeerID, peerID)
+	}
+	if callbackErr == nil {
+		t.Error("callback error should not be nil")
+	}
+	callbackMu.Unlock()
+
+	// Message should NOT be delivered to incoming channel (decryption failed)
+	select {
+	case <-incoming:
+		t.Error("message should not have been delivered due to decryption failure")
+	default:
+		// Expected - no message
 	}
 }

@@ -60,14 +60,12 @@ const (
 
 // registerHandshakeTypes registers all handshake message types with Cramberry.
 // This must be called before marshaling/unmarshaling handshake messages.
+// Uses idempotent registration (RegisterOrGetWithID) for thread safety.
 func registerHandshakeTypes() {
-	// Clear any previous registrations (useful for tests)
-	cramberry.DefaultRegistry.Clear()
-
-	// Register concrete types with specific TypeIDs
-	cramberry.MustRegisterWithID[HelloMessage](typeIDHelloMessage)
-	cramberry.MustRegisterWithID[PubKeyMessage](typeIDPubKeyMessage)
-	cramberry.MustRegisterWithID[CompleteMessage](typeIDCompleteMessage)
+	// Register concrete types with specific TypeIDs (idempotent - safe to call multiple times)
+	cramberry.RegisterOrGetWithID[HelloMessage](typeIDHelloMessage)
+	cramberry.RegisterOrGetWithID[PubKeyMessage](typeIDPubKeyMessage)
+	cramberry.RegisterOrGetWithID[CompleteMessage](typeIDCompleteMessage)
 }
 
 // marshalHandshakeMsg serializes a handshake message using Cramberry.

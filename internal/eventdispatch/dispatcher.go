@@ -43,11 +43,11 @@ func NewDispatcher(bufferSize int) *Dispatcher {
 // This is a non-blocking operation - if the channel is full, the event is dropped.
 func (d *Dispatcher) EmitEvent(event connection.Event) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if d.closed {
-		d.mu.Unlock()
 		return
 	}
-	d.mu.Unlock()
 
 	// Convert to ConnectionEvent type
 	evt := ConnectionEvent{

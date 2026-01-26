@@ -37,9 +37,10 @@ type EncryptedStream struct {
 	writer  *cramberry.StreamWriter
 	writeMu sync.Mutex
 
-	incoming chan<- IncomingMessage
-	ctx      context.Context
-	cancel   context.CancelFunc
+	incoming          chan<- IncomingMessage
+	onDecryptionError DecryptionErrorCallback
+	ctx               context.Context
+	cancel            context.CancelFunc
 
 	closed   bool
 	closeMu  sync.Mutex
@@ -48,6 +49,7 @@ type EncryptedStream struct {
 
 // NewEncryptedStream creates a new encrypted stream.
 // It starts a read goroutine to handle incoming messages.
+// The optional onDecryptionError callback is called when decryption fails.
 func NewEncryptedStream(
 	ctx context.Context,
 	name string,
@@ -55,6 +57,7 @@ func NewEncryptedStream(
 	stream network.Stream,
 	sharedKey []byte,
 	incoming chan<- IncomingMessage,
+	onDecryptionError DecryptionErrorCallback,
 ) (*EncryptedStream, error) {
 	// Create cipher for this shared key
 	cipher, err := crypto.NewCipher(sharedKey)
@@ -65,16 +68,17 @@ func NewEncryptedStream(
 	streamCtx, cancel := context.WithCancel(ctx)
 
 	es := &EncryptedStream{
-		name:      name,
-		peerID:    peerID,
-		stream:    stream,
-		sharedKey: sharedKey,
-		cipher:    cipher,
-		reader:    cramberry.NewMessageIterator(stream),
-		writer:    cramberry.NewStreamWriter(stream),
-		incoming:  incoming,
-		ctx:       streamCtx,
-		cancel:    cancel,
+		name:              name,
+		peerID:            peerID,
+		stream:            stream,
+		sharedKey:         sharedKey,
+		cipher:            cipher,
+		reader:            cramberry.NewMessageIterator(stream),
+		writer:            cramberry.NewStreamWriter(stream),
+		incoming:          incoming,
+		onDecryptionError: onDecryptionError,
+		ctx:               streamCtx,
+		cancel:            cancel,
 	}
 
 	// Start read goroutine
@@ -86,12 +90,33 @@ func NewEncryptedStream(
 // Send encrypts and sends data over the stream.
 // This method is thread-safe and can be called concurrently.
 func (es *EncryptedStream) Send(data []byte) error {
+	return es.SendCtx(context.Background(), data)
+}
+
+// SendCtx encrypts and sends data over the stream with context support for cancellation.
+// The provided context can be used to cancel the send operation or set a timeout.
+// This method is thread-safe and can be called concurrently.
+func (es *EncryptedStream) SendCtx(ctx context.Context, data []byte) error {
+	// Check context before starting
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	es.closeMu.Lock()
 	if es.closed {
 		es.closeMu.Unlock()
 		return fmt.Errorf("stream is closed")
 	}
 	es.closeMu.Unlock()
+
+	// Check context again after checking closed state
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 
 	// Encrypt the data
 	encrypted, err := es.cipher.Encrypt(data, nil)
@@ -102,6 +127,19 @@ func (es *EncryptedStream) Send(data []byte) error {
 	// Write with mutex to serialize writes
 	es.writeMu.Lock()
 	defer es.writeMu.Unlock()
+
+	// Check context before write (we may have waited for the lock)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	// Set deadline on stream if context has one
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = es.stream.SetWriteDeadline(deadline)
+		defer func() { _ = es.stream.SetWriteDeadline(time.Time{}) }()
+	}
 
 	// Write the encrypted message as a delimited Cramberry message
 	if err := es.writer.WriteDelimited(&encrypted); err != nil {
@@ -149,7 +187,11 @@ func (es *EncryptedStream) readLoop() {
 		decrypted, err := es.cipher.Decrypt(encrypted, nil)
 		if err != nil {
 			// Decryption failure could indicate tampering or wrong key
-			// Log and continue rather than closing stream
+			// Report the error for logging/metrics if callback is set
+			if es.onDecryptionError != nil {
+				es.onDecryptionError(es.peerID, err)
+			}
+			// Continue rather than closing stream
 			continue
 		}
 

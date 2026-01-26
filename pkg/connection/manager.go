@@ -86,6 +86,21 @@ func NewManager(
 // within the configured HandshakeTimeout, or the connection will be dropped
 // and the peer will enter cooldown.
 func (m *Manager) Connect(peerID peer.ID) error {
+	return m.ConnectCtx(context.Background(), peerID)
+}
+
+// ConnectCtx establishes a connection to a peer with context support for cancellation.
+// The provided context can be used to cancel the connection attempt or set a timeout.
+// If the context is cancelled before the connection completes, the operation returns
+// the context's error.
+func (m *Manager) ConnectCtx(ctx context.Context, peerID peer.ID) error {
+	// Check context before starting
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	m.mu.Lock()
 
 	// Check if peer is blacklisted
@@ -147,9 +162,27 @@ func (m *Manager) Connect(peerID peer.ID) error {
 		Addrs: peerEntry.Multiaddrs,
 	}
 
-	// Establish libp2p connection
-	connectCtx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+	// Create a context that's cancelled when either the provided context or manager context is done.
+	// Use a 30-second timeout as default if the provided context has no deadline.
+	var connectCtx context.Context
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		// User provided a context with deadline, use it
+		connectCtx, cancel = context.WithCancel(ctx)
+	} else {
+		// No deadline provided, use default timeout
+		connectCtx, cancel = context.WithTimeout(ctx, 30*time.Second)
+	}
 	defer cancel()
+
+	// Also respect the manager's context
+	go func() {
+		select {
+		case <-m.ctx.Done():
+			cancel()
+		case <-connectCtx.Done():
+		}
+	}()
 
 	if err := m.host.Connect(connectCtx, addrInfo); err != nil {
 		m.handleConnectFailure(peerID, err)
@@ -177,6 +210,19 @@ func (m *Manager) Connect(peerID peer.ID) error {
 
 // Disconnect closes the connection to a peer and cleans up resources.
 func (m *Manager) Disconnect(peerID peer.ID) error {
+	return m.DisconnectCtx(context.Background(), peerID)
+}
+
+// DisconnectCtx closes the connection to a peer with context support for cancellation.
+// The provided context can be used to cancel the operation if it takes too long.
+func (m *Manager) DisconnectCtx(ctx context.Context, peerID peer.ID) error {
+	// Check context before starting
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	m.mu.Lock()
 	conn, exists := m.connections[peerID]
 	if !exists {
@@ -193,6 +239,13 @@ func (m *Manager) Disconnect(peerID peer.ID) error {
 	}
 
 	m.mu.Unlock()
+
+	// Check context again before cleanup
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 
 	// Cleanup connection resources
 	conn.Cleanup()

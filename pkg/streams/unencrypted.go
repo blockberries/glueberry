@@ -70,6 +70,20 @@ func NewUnencryptedStream(
 // Send sends data over the stream without encryption.
 // This method is thread-safe and can be called concurrently.
 func (us *UnencryptedStream) Send(data []byte) error {
+	return us.SendCtx(context.Background(), data)
+}
+
+// SendCtx sends data over the stream without encryption with context support for cancellation.
+// The provided context can be used to cancel the send operation or set a timeout.
+// This method is thread-safe and can be called concurrently.
+func (us *UnencryptedStream) SendCtx(ctx context.Context, data []byte) error {
+	// Check context before starting
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	us.closeMu.Lock()
 	if us.closed {
 		us.closeMu.Unlock()
@@ -77,9 +91,29 @@ func (us *UnencryptedStream) Send(data []byte) error {
 	}
 	us.closeMu.Unlock()
 
+	// Check context again after checking closed state
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	// Write with mutex to serialize writes
 	us.writeMu.Lock()
 	defer us.writeMu.Unlock()
+
+	// Check context before write (we may have waited for the lock)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	// Set deadline on stream if context has one
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = us.stream.SetWriteDeadline(deadline)
+		defer func() { _ = us.stream.SetWriteDeadline(time.Time{}) }()
+	}
 
 	// Write the message as a delimited Cramberry message
 	if err := us.writer.WriteDelimited(&data); err != nil {

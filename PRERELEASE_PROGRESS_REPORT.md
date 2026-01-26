@@ -299,3 +299,329 @@ http.Handle("/metrics", promhttp.Handler())
 The Metrics interface is now available for integration. Instrumentation points will be added throughout the codebase as a follow-up task (can be done incrementally). The interface is designed to be zero-overhead when using NopMetrics.
 
 ---
+
+## Phase: P1-3 - Context Support
+
+**Status**: ✅ Completed
+**Priority**: P1 (Production Readiness)
+
+### Summary
+
+Implemented context support for all blocking operations in the public API. This allows callers to control timeouts and cancellation for connection, send, and disconnect operations.
+
+### Files Created
+
+- `context_test.go` - Comprehensive tests for context-aware methods
+
+### Files Modified
+
+- `node.go`:
+  - Added `ConnectCtx(ctx context.Context, peerID peer.ID) error` public API
+  - Added `DisconnectCtx(ctx context.Context, peerID peer.ID) error` public API
+  - Added `SendCtx(ctx context.Context, peerID peer.ID, stream string, data []byte) error` public API
+  - Updated `Connect()`, `Disconnect()`, `Send()` to call context variants with `context.Background()`
+
+- `pkg/connection/manager.go`:
+  - Added `ConnectCtx(ctx context.Context, peerID peer.ID) error`
+  - Added `DisconnectCtx(ctx context.Context, peerID peer.ID) error`
+  - Updated `Connect()` and `Disconnect()` to call context variants
+
+- `pkg/streams/manager.go`:
+  - Added `SendCtx(ctx context.Context, peerID peer.ID, streamName string, data []byte) error`
+  - Added `sendUnencryptedCtx()` for unencrypted stream sending with context
+  - Added `openUnencryptedStreamLazilyCtx()` for lazy stream opening with context
+  - Added `openStreamLazilyCtx()` for encrypted stream opening with context
+  - Updated `Send()` to call `SendCtx` with `context.Background()`
+
+- `pkg/streams/encrypted.go`:
+  - Added `SendCtx(ctx context.Context, data []byte) error`
+  - Respects context deadline by setting stream write deadline
+  - Updated `Send()` to call `SendCtx` with `context.Background()`
+
+- `pkg/streams/unencrypted.go`:
+  - Added `SendCtx(ctx context.Context, data []byte) error`
+  - Respects context deadline by setting stream write deadline
+  - Updated `Send()` to call `SendCtx` with `context.Background()`
+
+### Key Functionality Implemented
+
+1. **Context-aware Connect**:
+   - Respects context cancellation and deadline
+   - Propagates context to libp2p dial operation
+   - Uses 30-second default timeout if context has no deadline
+
+2. **Context-aware Send**:
+   - Checks context before starting operation
+   - Checks context after acquiring write lock
+   - Sets stream write deadline from context deadline
+   - Clears deadline after operation completes
+
+3. **Context-aware Disconnect**:
+   - Checks context before starting operation
+   - Allows cancellation of cleanup operations
+
+4. **Backwards Compatibility**:
+   - Original methods (`Connect`, `Send`, `Disconnect`) still work
+   - They internally call context variants with `context.Background()`
+
+### Test Coverage
+
+- `TestConnectCtx_ContextCancelled` - Verifies immediate cancellation
+- `TestSendCtx_ContextCancelled` - Verifies send cancellation
+- `TestDisconnectCtx_ContextCancelled` - Verifies disconnect cancellation
+- `TestConnectCtx_Timeout` - Verifies deadline expiration
+- `TestNodeNotStarted_Ctx` - Verifies error handling when node not started
+- `TestConnect_WrapsConnectCtx` - Verifies backwards compatibility
+- `TestSend_WrapsSendCtx` - Verifies backwards compatibility
+
+All tests pass with race detection enabled.
+
+### Usage Example
+
+```go
+// Connect with 5-second timeout
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+if err := node.ConnectCtx(ctx, peerID); err != nil {
+    if err == context.DeadlineExceeded {
+        log.Println("Connection timed out")
+    }
+    return err
+}
+
+// Send with cancellation support
+ctx, cancel = context.WithCancel(context.Background())
+go func() {
+    <-shutdownSignal
+    cancel()
+}()
+
+if err := node.SendCtx(ctx, peerID, "data", message); err != nil {
+    if err == context.Canceled {
+        log.Println("Send cancelled")
+    }
+    return err
+}
+```
+
+### Design Decisions
+
+1. **Context propagation pattern**: Context is checked at multiple points (before acquiring locks, after acquiring locks, before I/O) to ensure responsiveness to cancellation.
+
+2. **Stream deadline integration**: When context has a deadline, it's set as the stream's write deadline, allowing the underlying network operations to respect the timeout.
+
+3. **Backwards compatibility**: Original non-context methods are preserved as thin wrappers, ensuring existing code continues to work without changes.
+
+---
+
+## Phase: P1-4 - Rich Error Types
+
+**Status**: ✅ Completed
+**Priority**: P1 (Production Readiness)
+
+### Summary
+
+Implemented rich error types with error codes for programmatic error handling. The Error type provides structured information including error code, message, peer ID, stream name, underlying cause, and retriability status.
+
+### Files Created
+
+- `errors_rich_test.go` - Comprehensive tests for rich error types
+
+### Files Modified
+
+- `errors.go`:
+  - Added `ErrorCode` type and constants for all error categories
+  - Added `Error` struct with Code, Message, PeerID, Stream, Cause, and Retriable fields
+  - Implemented `Error()`, `Unwrap()`, and `Is()` methods for standard error interface
+  - Added `IsRetriable()` and `IsPermanent()` helper functions
+  - Added factory functions: `NewError()`, `NewErrorWithCause()`, `NewPeerError()`, `NewStreamError()`
+  - Preserved existing sentinel errors for backwards compatibility
+
+### Key Functionality Implemented
+
+1. **ErrorCode constants**:
+   - `ErrCodeUnknown` - Unknown/unclassified error
+   - `ErrCodeConnectionFailed` - Connection attempt failed
+   - `ErrCodeHandshakeFailed` - Handshake protocol failed
+   - `ErrCodeHandshakeTimeout` - Handshake timed out
+   - `ErrCodeStreamClosed` - Stream has been closed
+   - `ErrCodeEncryptionFailed` - Encryption failed
+   - `ErrCodeDecryptionFailed` - Decryption failed
+   - `ErrCodePeerNotFound` - Peer not found
+   - `ErrCodePeerBlacklisted` - Peer is blacklisted
+   - `ErrCodeBufferFull` - Buffer (event/message) is full
+   - `ErrCodeContextCanceled` - Context was cancelled
+   - `ErrCodeInvalidConfig` - Configuration is invalid
+   - `ErrCodeNodeNotStarted` - Node not started
+   - `ErrCodeNodeAlreadyStarted` - Node already running
+
+2. **Error struct**:
+   - Rich context including peer ID and stream name
+   - Supports error wrapping with Cause field
+   - Retriable flag for retry logic
+
+3. **Standard error interface**:
+   - `Error()` - Returns human-readable message
+   - `Unwrap()` - Returns underlying cause
+   - `Is()` - Compares by error code for `errors.Is()` support
+
+4. **Helper functions**:
+   - `IsRetriable(err)` - Check if error can be retried
+   - `IsPermanent(err)` - Check if error is permanent (blacklisted, invalid config)
+
+5. **Factory functions**:
+   - `NewError(code, message)` - Basic error
+   - `NewErrorWithCause(code, message, cause)` - Error with underlying cause
+   - `NewPeerError(code, message, peerID)` - Peer-specific error
+   - `NewStreamError(code, message, peerID, stream)` - Stream-specific error
+
+### Test Coverage
+
+- `TestErrorCode_String` - All error code string representations
+- `TestError_Error` - Error message formatting with/without cause
+- `TestError_Unwrap` - Error unwrapping
+- `TestError_Is` - Error code matching
+- `TestError_ErrorsIs` - Integration with `errors.Is()`
+- `TestError_ErrorsAs` - Integration with `errors.As()`
+- `TestIsRetriable` - Retriability checking
+- `TestIsPermanent` - Permanent error detection
+- `TestNewError` - Factory function
+- `TestNewErrorWithCause` - Factory function with cause
+- `TestNewPeerError` - Peer error factory
+- `TestNewStreamError` - Stream error factory
+- `TestError_Fields` - All struct fields
+
+All tests pass with race detection enabled.
+
+### Usage Example
+
+```go
+// Creating errors
+err := &Error{
+    Code:      ErrCodeConnectionFailed,
+    Message:   "connection refused",
+    PeerID:    peerID,
+    Cause:     dialErr,
+    Retriable: true,
+}
+
+// Checking error types
+if errors.Is(err, &Error{Code: ErrCodeConnectionFailed}) {
+    // Handle connection failure
+}
+
+// Using helper functions
+if IsRetriable(err) {
+    // Retry the operation
+}
+
+if IsPermanent(err) {
+    // Don't retry, remove peer
+}
+
+// Extracting error details
+var gErr *Error
+if errors.As(err, &gErr) {
+    log.Printf("Error on peer %s: %s", gErr.PeerID, gErr.Message)
+}
+```
+
+### Design Decisions
+
+1. **Backwards compatibility**: Existing sentinel errors are preserved. The rich Error type can coexist with them.
+
+2. **Error code based Is()**: Two Glueberry errors are equal if they have the same error code, regardless of other fields. This allows `errors.Is(err, &Error{Code: ErrCodeFoo})` pattern.
+
+3. **Permanent vs retriable**: PeerBlacklisted and InvalidConfig are permanent errors. Other errors may be retriable depending on context.
+
+---
+
+## Phase: Security Medium - Decryption Failure Observability
+
+**Status**: ✅ Completed
+**Priority**: Security Medium
+
+### Summary
+
+Implemented decryption failure observability through a callback mechanism. When message decryption fails (potentially indicating tampering or wrong key), the failure is logged and metrics are recorded. This provides visibility into potential security events.
+
+### Files Modified
+
+- `pkg/streams/encrypted.go`:
+  - Added `onDecryptionError DecryptionErrorCallback` field to `EncryptedStream` struct
+  - Updated `NewEncryptedStream` to accept callback parameter
+  - Updated `readLoop()` to invoke callback on decryption failure
+
+- `pkg/streams/manager.go`:
+  - Added `DecryptionErrorCallback` type definition
+  - Added `onDecryptionError DecryptionErrorCallback` field to `Manager` struct
+  - Added `SetDecryptionErrorCallback(callback DecryptionErrorCallback)` method
+  - Updated `createEncryptedStream()` and `HandleIncomingStream()` to pass callback to encrypted streams
+
+- `pkg/streams/encrypted_test.go`:
+  - Added `TestEncryptedStream_DecryptionErrorCallback` test
+  - Updated all `NewEncryptedStream` calls to include callback parameter
+
+- `node.go`:
+  - Added callback wiring in `New()` to log decryption failures and record metrics
+  - Uses `Logger.Warn()` for logging with peer_id and error context
+  - Uses `Metrics.DecryptionError()` for metrics recording
+
+- `internal/eventdispatch/dispatcher.go`:
+  - Fixed race condition in `EmitEvent()` by holding mutex during channel send
+  - Previously, the mutex was released before sending to channel, allowing `Close()` to race
+
+### Key Functionality Implemented
+
+1. **DecryptionErrorCallback type**: `func(peerID peer.ID, err error)` - callback invoked on decryption failure
+
+2. **Manager.SetDecryptionErrorCallback()**: Allows setting the callback for all encrypted streams
+
+3. **Automatic wiring in Node**: When Logger or Metrics are configured, decryption failures are automatically logged and recorded
+
+4. **Race condition fix**: Fixed concurrent access bug in event dispatcher between `EmitEvent()` and `Close()`
+
+### Test Coverage
+
+- `TestEncryptedStream_DecryptionErrorCallback` - Verifies callback is invoked when decryption fails with mismatched keys
+- Tests verify callback receives correct peer ID and error
+- Tests verify message is NOT delivered on decryption failure
+- All existing tests updated to pass nil callback parameter
+
+All tests pass with race detection enabled.
+
+### Security Considerations
+
+- Decryption failures are logged at Warn level (not Error) as they may indicate network issues or misconfiguration
+- Peer ID is logged to help identify problematic peers
+- Error message is logged for debugging but does NOT contain sensitive data
+- Metrics increment allows monitoring for unusual patterns (potential attack detection)
+
+### Usage Example
+
+```go
+// Automatic with configured Logger and Metrics
+cfg := glueberry.Config{
+    PrivateKey:      privateKey,
+    AddressBookPath: "/path/to/addressbook.json",
+    ListenAddrs:     listenAddrs,
+    Logger:          myLogger,
+    Metrics:         myMetrics,
+}
+
+node, _ := glueberry.New(&cfg)
+// Decryption failures will automatically:
+// 1. Log: "decryption failed" with peer_id and error
+// 2. Record: metrics.DecryptionError()
+```
+
+### Design Decisions
+
+1. **Callback pattern**: Using a callback allows flexibility - the streams package doesn't depend on logging or metrics packages.
+
+2. **Continue on failure**: Decryption failures don't close the stream. This allows recovery from transient issues while still providing visibility.
+
+3. **Warn level logging**: Decryption failures are logged at Warn level since they're not necessarily errors (could be network corruption or misconfiguration).
+
+---

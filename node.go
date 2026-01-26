@@ -100,6 +100,16 @@ func New(cfg *Config) (*Node, error) {
 	// Create stream manager
 	streamMgr := streams.NewManager(ctx, libp2pHost, cryptoModule, messagesChan)
 
+	// Wire up decryption error callback for logging and metrics
+	streamMgr.SetDecryptionErrorCallback(func(peerID peer.ID, err error) {
+		if cfg.Logger != nil {
+			cfg.Logger.Warn("decryption failed", "peer_id", peerID.String(), "error", err.Error())
+		}
+		if cfg.Metrics != nil {
+			cfg.Metrics.DecryptionError()
+		}
+	})
+
 	// Create connection manager
 	connMgrConfig := connection.ManagerConfig{
 		HandshakeTimeout:        cfg.HandshakeTimeout,
@@ -317,6 +327,13 @@ func (n *Node) PeerAddrs(peerID peer.ID) []multiaddr.Multiaddr {
 // using Send() and Messages() on the "handshake" stream.
 // The handshake must be completed within the configured timeout by calling CompleteHandshake().
 func (n *Node) Connect(peerID peer.ID) error {
+	return n.ConnectCtx(context.Background(), peerID)
+}
+
+// ConnectCtx establishes a connection to a peer with context support for cancellation.
+// The provided context can be used to cancel the connection attempt or set a timeout.
+// On success, the connection enters StateConnected and the "handshake" stream becomes available.
+func (n *Node) ConnectCtx(ctx context.Context, peerID peer.ID) error {
 	n.startMu.Lock()
 	if !n.started {
 		n.startMu.Unlock()
@@ -324,12 +341,18 @@ func (n *Node) Connect(peerID peer.ID) error {
 	}
 	n.startMu.Unlock()
 
-	return n.connections.Connect(peerID)
+	return n.connections.ConnectCtx(ctx, peerID)
 }
 
 // Disconnect closes the connection to a peer.
 func (n *Node) Disconnect(peerID peer.ID) error {
-	return n.connections.Disconnect(peerID)
+	return n.DisconnectCtx(context.Background(), peerID)
+}
+
+// DisconnectCtx closes the connection to a peer with context support for cancellation.
+// The provided context can be used to cancel the operation if it takes too long.
+func (n *Node) DisconnectCtx(ctx context.Context, peerID peer.ID) error {
+	return n.connections.DisconnectCtx(ctx, peerID)
 }
 
 // PrepareStreams prepares encrypted streams for communication with a peer.
@@ -539,6 +562,12 @@ func (n *Node) registerIncomingStreamHandlers(streamNames []string) {
 
 // Send sends data over an encrypted stream to a peer.
 func (n *Node) Send(peerID peer.ID, streamName string, data []byte) error {
+	return n.SendCtx(context.Background(), peerID, streamName, data)
+}
+
+// SendCtx sends data over an encrypted stream to a peer with context support for cancellation.
+// The provided context can be used to cancel the send operation or set a timeout.
+func (n *Node) SendCtx(ctx context.Context, peerID peer.ID, streamName string, data []byte) error {
 	n.startMu.Lock()
 	if !n.started {
 		n.startMu.Unlock()
@@ -546,7 +575,7 @@ func (n *Node) Send(peerID peer.ID, streamName string, data []byte) error {
 	}
 	n.startMu.Unlock()
 
-	return n.streamManager.Send(peerID, streamName, data)
+	return n.streamManager.SendCtx(ctx, peerID, streamName, data)
 }
 
 // Messages returns the channel for receiving incoming messages.
