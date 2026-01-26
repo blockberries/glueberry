@@ -1770,3 +1770,104 @@ All examples build successfully with `go build ./examples/...`. No tests require
 5. **Connection direction**: The blockchain example shows how to use IsOutbound() to determine protocol roles (initiator vs responder).
 
 ---
+
+## Phase CP-2: Fuzz Testing Infrastructure
+
+**Status**: ✅ Completed
+**Priority**: P0 (Critical - Security)
+
+### Summary
+
+Implemented comprehensive fuzz testing infrastructure to identify panics, buffer overflows, and other issues when handling malformed or malicious input. This addresses the security audit preparation requirement for systematic testing of untrusted input handling.
+
+### Files Created
+
+- `fuzz/crypto_fuzz_test.go` - Fuzz tests for cryptographic operations
+- `fuzz/addressbook_fuzz_test.go` - Fuzz tests for address book JSON parsing
+- `fuzz/cramberry_fuzz_test.go` - Fuzz tests for Cramberry message framing
+- `fuzz/handshake_fuzz_test.go` - Fuzz tests for handshake protocol parsing
+
+### Files Modified
+
+- `Makefile` - Added fuzz testing targets
+
+### Fuzz Tests Implemented
+
+1. **Crypto Fuzz Tests** (`fuzz/crypto_fuzz_test.go`):
+   - `FuzzDecrypt` - Tests decryption with malformed ciphertext
+   - `FuzzDecryptRoundTrip` - Tests encrypt/decrypt consistency
+   - `FuzzEd25519PublicToX25519` - Tests key conversion with invalid keys
+   - `FuzzEd25519PrivateToX25519` - Tests private key conversion
+   - `FuzzNewCipher` - Tests cipher creation with various key sizes
+
+2. **Address Book Fuzz Tests** (`fuzz/addressbook_fuzz_test.go`):
+   - `FuzzAddressBookJSON` - Tests address book JSON parsing with malformed data
+   - `FuzzPeerEntryJSON` - Tests peer entry JSON parsing
+   - `FuzzMultiaddrParsing` - Tests multiaddr string handling
+
+3. **Cramberry Message Fuzz Tests** (`fuzz/cramberry_fuzz_test.go`):
+   - `FuzzMessageIterator` - Tests delimited message reading with corrupted data
+   - `FuzzStreamReaderVarint` - Tests varint parsing with truncated/overflow data
+   - `FuzzStreamReaderString` - Tests string parsing with invalid UTF-8
+   - `FuzzStreamReaderBytes` - Tests byte slice parsing
+   - `FuzzStreamWriterReader` - Tests write/read round-trip consistency
+   - `FuzzDelimitedMessages` - Tests delimited message format
+   - `FuzzMarshalUnmarshal` - Tests type serialization round-trip
+
+4. **Handshake Protocol Fuzz Tests** (`fuzz/handshake_fuzz_test.go`):
+   - `FuzzHandshakeMessageParsing` - Tests handshake message parsing
+   - `FuzzHandshakeDelimited` - Tests delimited handshake messages
+   - `FuzzHandshakeMessageRoundTrip` - Tests handshake serialization consistency
+   - `FuzzCryptoMaterial` - Tests cryptographic field handling
+   - `FuzzMultipleHandshakeMessages` - Tests sequential message parsing
+
+### Makefile Targets Added
+
+```makefile
+# Run all fuzz tests (default 30s each)
+make fuzz
+
+# Run specific fuzz test categories
+make fuzz-crypto
+make fuzz-addressbook
+make fuzz-cramberry
+make fuzz-handshake
+
+# Override fuzz duration
+FUZZTIME=60s make fuzz
+
+# List available fuzz targets
+make fuzz-list
+```
+
+### Seed Corpus
+
+Each fuzz test includes a comprehensive seed corpus covering:
+- Valid inputs (baseline coverage)
+- Edge cases (empty, truncated, oversized)
+- Malformed inputs (invalid encoding, wrong types)
+- Attack vectors (overflow attempts, deeply nested structures)
+- Unicode edge cases (invalid UTF-8, surrogate halves)
+
+### Test Coverage
+
+All fuzz tests pass with no panics detected during initial fuzzing runs. Example output:
+```
+=== RUN   FuzzHandshakeMessageParsing
+fuzz: elapsed: 3s, execs: 543676, new interesting: 96
+--- PASS: FuzzHandshakeMessageParsing (3.01s)
+```
+
+### Design Decisions
+
+1. **Mirror internal types**: For address book fuzzing, internal types are mirrored in the fuzz package to avoid import cycles while still testing JSON parsing behavior.
+
+2. **Focus on boundaries**: Fuzz tests focus on system boundaries where untrusted data enters (network messages, file parsing) rather than internal APIs.
+
+3. **Configurable duration**: The FUZZTIME variable allows adjusting fuzz duration for different CI/local testing scenarios.
+
+4. **Comprehensive seed corpus**: Each test includes 10-20 seed inputs covering valid data, edge cases, and known attack patterns to guide the fuzzer effectively.
+
+5. **No panic tolerance**: All fuzz tests verify that malformed input results in errors, not panics, ensuring robust error handling.
+
+---

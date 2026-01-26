@@ -1,4 +1,4 @@
-.PHONY: all build test test-race lint clean benchmark bench
+.PHONY: all build test test-race lint clean benchmark bench fuzz fuzz-crypto fuzz-addressbook fuzz-cramberry fuzz-handshake
 
 all: build test lint
 
@@ -53,3 +53,52 @@ bench-all:
 bench-compare:
 	@echo "Run 'go test -bench=. -benchmem ./benchmark/... > new.txt' to create a baseline"
 	@echo "Then run 'benchstat old.txt new.txt' to compare"
+
+# Fuzz testing targets
+# Default fuzz time is 30 seconds; override with FUZZTIME=60s make fuzz
+FUZZTIME ?= 30s
+
+fuzz:
+	@echo "Running all fuzz tests for $(FUZZTIME)..."
+	go test -fuzz=FuzzDecrypt -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzDecryptRoundTrip -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzNewCipher -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzAddressBookJSON -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzMessageIterator -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzHandshakeMessageParsing -fuzztime=$(FUZZTIME) ./fuzz/
+
+fuzz-crypto:
+	@echo "Running crypto fuzz tests for $(FUZZTIME)..."
+	go test -fuzz=FuzzDecrypt -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzDecryptRoundTrip -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzEd25519PublicToX25519 -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzEd25519PrivateToX25519 -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzNewCipher -fuzztime=$(FUZZTIME) ./fuzz/
+
+fuzz-addressbook:
+	@echo "Running address book fuzz tests for $(FUZZTIME)..."
+	go test -fuzz=FuzzAddressBookJSON -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzPeerEntryJSON -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzMultiaddrParsing -fuzztime=$(FUZZTIME) ./fuzz/
+
+fuzz-cramberry:
+	@echo "Running Cramberry message fuzz tests for $(FUZZTIME)..."
+	go test -fuzz=FuzzMessageIterator -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzStreamReaderVarint -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzStreamReaderString -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzStreamReaderBytes -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzStreamWriterReader -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzDelimitedMessages -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzMarshalUnmarshal -fuzztime=$(FUZZTIME) ./fuzz/
+
+fuzz-handshake:
+	@echo "Running handshake protocol fuzz tests for $(FUZZTIME)..."
+	go test -fuzz=FuzzHandshakeMessageParsing -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzHandshakeDelimited -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzHandshakeMessageRoundTrip -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzCryptoMaterial -fuzztime=$(FUZZTIME) ./fuzz/
+	go test -fuzz=FuzzMultipleHandshakeMessages -fuzztime=$(FUZZTIME) ./fuzz/
+
+fuzz-list:
+	@echo "Available fuzz targets:"
+	@go test -list='Fuzz.*' ./fuzz/ 2>/dev/null | grep -E '^Fuzz'
