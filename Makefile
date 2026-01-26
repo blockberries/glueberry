@@ -1,4 +1,4 @@
-.PHONY: all build test test-race lint clean
+.PHONY: all build test test-race lint clean benchmark bench
 
 all: build test lint
 
@@ -35,3 +35,21 @@ fmt:
 
 tidy:
 	go mod tidy
+
+# Benchmark targets
+benchmark: bench
+
+bench:
+	go test -bench=. -benchmem ./benchmark/...
+	go test -bench=. -benchmem ./pkg/crypto/...
+
+bench-crypto:
+	go test -bench=. -benchmem ./benchmark/... -run='^$$'
+	go test -bench=. -benchmem ./pkg/crypto/... -run='^$$'
+
+bench-all:
+	go test -bench=. -benchmem ./... -run='^$$'
+
+bench-compare:
+	@echo "Run 'go test -bench=. -benchmem ./benchmark/... > new.txt' to create a baseline"
+	@echo "Then run 'benchstat old.txt new.txt' to compare"

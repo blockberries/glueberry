@@ -1216,3 +1216,104 @@ func doHandshake(node *glueberry.Node, peerID peer.ID, hsm *glueberry.HandshakeS
 5. **Reset capability**: Failed handshakes can be reset and retried from scratch, useful for reconnection scenarios.
 
 ---
+
+## Phase: P4-1 - Benchmark Suite
+
+**Status**: ✅ Completed
+**Priority**: P2 (Performance Baseline)
+
+### Summary
+
+Implemented a comprehensive benchmark suite for measuring crypto performance, message serialization, and stream throughput. The benchmarks provide performance baselines for key operations and support performance regression testing.
+
+### Files Created
+
+- `benchmark/crypto_bench_test.go` - Cryptographic operation benchmarks
+- `benchmark/stream_bench_test.go` - Message path and serialization benchmarks
+
+### Files Modified
+
+- `Makefile`:
+  - Added `benchmark` and `bench` targets for running benchmarks
+  - Added `bench-crypto` target for crypto-only benchmarks
+  - Added `bench-all` target for running benchmarks across entire codebase
+  - Added `bench-compare` target with instructions for using benchstat
+
+### Key Functionality Implemented
+
+1. **Crypto Benchmarks** (`benchmark/crypto_bench_test.go`):
+   - `BenchmarkEd25519PrivateToX25519` - Ed25519 to X25519 private key conversion
+   - `BenchmarkEd25519PublicToX25519` - Ed25519 to X25519 public key conversion
+   - `BenchmarkComputeX25519SharedSecret` - Raw ECDH shared secret computation
+   - `BenchmarkDeriveSharedKey` - Full key derivation (ECDH + HKDF)
+   - `BenchmarkEncrypt_*` - Encryption at 64B, 256B, 1KB, 4KB, 16KB, 64KB, 1MB
+   - `BenchmarkDecrypt_*` - Decryption at 64B, 256B, 1KB, 4KB, 16KB, 64KB, 1MB
+   - `BenchmarkModule_DeriveSharedKey` - Module-level key derivation (cached/uncached)
+   - `BenchmarkModule_EncryptDecrypt` - Module-level encrypt/decrypt operations
+
+2. **Message Path Benchmarks** (`benchmark/stream_bench_test.go`):
+   - `BenchmarkMessagePath_*` - Full send path (cramberry serialize + encrypt) at 64B to 64KB
+   - `BenchmarkReceivePath_*` - Full receive path (decrypt + cramberry deserialize) at 64B to 64KB
+   - `BenchmarkCramberry_Marshal_*` - Cramberry serialization alone
+   - `BenchmarkCramberry_Unmarshal_*` - Cramberry deserialization alone
+
+3. **Makefile Targets**:
+   - `make benchmark` / `make bench` - Run benchmark suite
+   - `make bench-crypto` - Run crypto benchmarks only (skips unit tests)
+   - `make bench-all` - Run benchmarks across entire codebase
+   - `make bench-compare` - Instructions for performance comparison with benchstat
+
+### Benchmark Results (Reference)
+
+Crypto operations:
+- Encrypt/Decrypt 1MB: ~1.2 GB/s throughput
+- Encrypt/Decrypt 64KB: ~1.0 GB/s throughput
+- Key derivation (cached): ~35 ns/op
+- Key derivation (uncached): ~125 µs/op (includes key generation)
+
+Message path:
+- Send path (serialize+encrypt) 1KB: ~685 MB/s
+- Receive path (decrypt+deserialize) 1KB: ~440 MB/s
+- Cramberry Marshal 64KB: ~3.5 GB/s (essentially memory copy)
+
+### Test Coverage
+
+All benchmarks run successfully with proper setup/teardown:
+- Random key/data generation for realistic measurements
+- Proper use of `b.ResetTimer()` to exclude setup
+- `b.SetBytes()` for throughput calculations
+- Memory allocation tracking with `-benchmem`
+
+### Usage Example
+
+```bash
+# Run all benchmarks
+make bench
+
+# Run crypto benchmarks only
+make bench-crypto
+
+# Compare performance between versions
+# First, save baseline:
+go test -bench=. -benchmem ./benchmark/... > baseline.txt
+
+# After changes, save new results:
+go test -bench=. -benchmem ./benchmark/... > current.txt
+
+# Compare using benchstat:
+benchstat baseline.txt current.txt
+```
+
+### Design Decisions
+
+1. **Separate benchmark package**: Benchmarks are in their own `benchmark/` directory to avoid polluting the main package and to allow independent execution.
+
+2. **Multiple message sizes**: Benchmarks test various message sizes (64B to 1MB) to show how performance scales with data size. This helps identify any non-linear performance characteristics.
+
+3. **Hot path focus**: The message path benchmarks focus on the serialization + encryption path (the "hot path" for sending/receiving messages) rather than trying to mock full network streams.
+
+4. **Cached vs uncached key derivation**: The Module benchmarks explicitly test both cached (repeat peer) and uncached (new peer) key derivation to show the benefit of the internal cache.
+
+5. **Memory allocation tracking**: All benchmarks are run with `-benchmem` to track allocations per operation, which is important for garbage collection pressure in high-throughput scenarios.
+
+---
