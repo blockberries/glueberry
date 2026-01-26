@@ -1396,3 +1396,91 @@ go book2.AddPeer(peer2, addrs, nil)
 4. **Unix-only flock**: Uses `syscall.Flock` which is available on Unix systems. For cross-platform support in the future, could add build tags for Windows.
 
 ---
+
+## Phase: P4-2 - Buffer Pooling
+
+**Status**: ✅ Completed
+**Priority**: P2 (Performance)
+
+### Summary
+
+Implemented a buffer pooling utility to reduce GC pressure for high-throughput scenarios. The pool provides size-classed buffer allocation that reuses memory instead of allocating new buffers for each operation.
+
+### Files Created
+
+- `internal/pool/buffer.go` - Buffer pool implementation with size classes
+- `internal/pool/buffer_test.go` - Comprehensive tests and benchmarks
+
+### Key Functionality Implemented
+
+1. **BufferPool Type**:
+   - Three size classes: small (≤1KB), medium (≤4KB), large (≤64KB)
+   - Very large buffers (>64KB) allocated directly (not pooled)
+   - Thread-safe using `sync.Pool`
+
+2. **Pool Methods**:
+   - `Get(size int) *[]byte` - Get buffer with at least specified capacity
+   - `Put(buf *[]byte)` - Return buffer to pool
+   - `GetExact(size int) *[]byte` - Get buffer with exact length (zeroed)
+
+3. **Global Pool Functions**:
+   - `GetBuffer(size int)` - Get from global pool
+   - `PutBuffer(buf *[]byte)` - Return to global pool
+   - `GetExactBuffer(size int)` - Get exact-sized from global pool
+
+4. **Size Classes**:
+   - Small: ≤ 1024 bytes (SmallBufferSize)
+   - Medium: ≤ 4096 bytes (DefaultBufferSize)
+   - Large: ≤ 65536 bytes (LargeBufferSize)
+   - Direct: > 65536 bytes (not pooled)
+
+### Test Coverage
+
+- `TestNewBufferPool` - Pool creation
+- `TestBufferPool_Get_Small/Medium/Large/VeryLarge` - Size class selection
+- `TestBufferPool_Put_ReturnsToPool` - Buffer reuse
+- `TestBufferPool_Put_Nil` - Nil safety
+- `TestBufferPool_GetExact` - Exact-size allocation with zeroing
+- `TestGlobalPool` - Global pool functions
+- `TestBufferPool_Concurrent` - Thread safety
+- `TestBufferPool_SizeClasses` - Size class boundaries
+
+Benchmarks included comparing pool vs direct allocation.
+
+All tests pass with race detection enabled.
+
+### Usage Example
+
+```go
+import "github.com/blockberries/glueberry/internal/pool"
+
+// Using the global pool
+buf := pool.GetBuffer(1024)
+*buf = append(*buf, data...)
+// ... use buffer ...
+pool.PutBuffer(buf)
+
+// Using a dedicated pool
+p := pool.NewBufferPool()
+buf := p.Get(4096)
+*buf = append(*buf, moreData...)
+p.Put(buf)
+
+// Getting exact-sized, zeroed buffer
+zeroed := pool.GetExactBuffer(256)
+// Buffer is guaranteed to be 256 bytes and zeroed
+```
+
+### Design Decisions
+
+1. **Size classes**: Using multiple size classes prevents wasting memory when small buffers are requested but large ones are returned.
+
+2. **Pointer to slice**: Using `*[]byte` allows the slice header itself to be reused, not just the backing array.
+
+3. **Not pooling very large buffers**: Buffers > 64KB are not pooled to avoid holding large amounts of memory. Let GC handle these.
+
+4. **Global pool**: Provides convenient access for simple use cases. Applications can also create dedicated pools.
+
+5. **Internal package**: Currently an internal utility. Can be exposed as public API if needed by applications.
+
+---
