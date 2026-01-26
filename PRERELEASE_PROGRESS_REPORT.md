@@ -1660,3 +1660,113 @@ fmt.Println(node.DumpStateString())
 4. **Timestamp included**: Each state capture includes a timestamp for correlation with logs.
 
 ---
+
+## Phase: P5-1 - Additional Examples
+
+**Status**: ✅ Completed
+**Priority**: P2 (Developer Experience)
+
+### Summary
+
+Created comprehensive examples demonstrating various Glueberry usage patterns. The examples show real-world integration scenarios including file transfer, RPC patterns, cluster coordination, and blockchain integration.
+
+### Files Created
+
+- `examples/file-transfer/main.go` - Large data transfer with progress reporting
+- `examples/rpc/main.go` - Request/response (RPC) communication pattern
+- `examples/cluster/main.go` - Multi-node cluster with gossip-based discovery
+- `examples/blockberry-integration/main.go` - Blockchain node integration pattern
+
+### Key Functionality Demonstrated
+
+1. **File Transfer Example** (`examples/file-transfer/`):
+   - Chunked file transmission (64KB chunks)
+   - Progress reporting during transfer
+   - SHA-256 checksum verification
+   - Acknowledgment-based flow
+   - Interactive CLI for sending files
+
+2. **RPC Pattern Example** (`examples/rpc/`):
+   - Request/response messaging over encrypted streams
+   - Request ID tracking for response correlation
+   - Multiple concurrent pending requests
+   - Timeout support with context
+   - Example methods: echo, add, getTime, getPeers
+   - Error handling with structured error responses
+
+3. **Multi-Node Cluster Example** (`examples/cluster/`):
+   - Gossip-based peer discovery
+   - Automatic connection to discovered peers
+   - Broadcast messaging with deduplication
+   - Ping/pong heartbeat for liveness
+   - Member join/leave tracking
+   - Interactive CLI for cluster operations
+
+4. **Blockchain Integration Example** (`examples/blockberry-integration/`):
+   - Custom handshake protocol with chain validation
+   - Multiple stream types (consensus, mempool, sync)
+   - Connection direction handling (important for protocol roles)
+   - Genesis/ChainID verification during handshake
+   - Transaction gossip simulation
+   - Block proposal simulation
+   - Peer scoring concept
+   - Two-phase handshake using PrepareStreams/FinalizeHandshake
+
+### Usage Examples
+
+```bash
+# File Transfer
+# Terminal 1 (receiver):
+go run ./examples/file-transfer/ -port 9000
+
+# Terminal 2 (sender):
+go run ./examples/file-transfer/ -port 9001 -peer /ip4/127.0.0.1/tcp/9000/p2p/... -send myfile.txt
+
+# RPC
+# Terminal 1 (server):
+go run ./examples/rpc/ -port 9000
+
+# Terminal 2 (client):
+go run ./examples/rpc/ -port 9001 -peer /ip4/127.0.0.1/tcp/9000/p2p/...
+> echo hello
+> add 5 3
+> time
+
+# Cluster
+# Terminal 1 (first node):
+go run ./examples/cluster/ -port 9000 -name node1
+
+# Terminal 2 (join cluster):
+go run ./examples/cluster/ -port 9001 -name node2 -bootstrap /ip4/127.0.0.1/tcp/9000/p2p/...
+
+# Terminal 3 (join cluster):
+go run ./examples/cluster/ -port 9002 -name node3 -bootstrap /ip4/127.0.0.1/tcp/9001/p2p/...
+
+# Blockchain Integration
+# Terminal 1:
+go run ./examples/blockberry-integration/ -port 9000 -chain testnet-1
+
+# Terminal 2:
+go run ./examples/blockberry-integration/ -port 9001 -chain testnet-1 -peer /ip4/127.0.0.1/tcp/9000/p2p/...
+> tx hello world
+> propose
+> peers
+```
+
+### Test Coverage
+
+All examples build successfully with `go build ./examples/...`. No tests required for examples as they are demonstration code.
+
+### Design Decisions
+
+1. **Interactive CLI**: All examples include interactive command-line interfaces for easy experimentation and demonstration.
+
+2. **Self-contained**: Each example is self-contained with its own handshake protocol, demonstrating how applications would implement the full connection flow.
+
+3. **Realistic patterns**: Examples demonstrate realistic patterns (chunking, progress, checksums) rather than trivial hello-world examples.
+
+4. **Two-phase handshake**: The blockchain example demonstrates the recommended two-phase handshake (PrepareStreams + FinalizeHandshake) for avoiding race conditions.
+
+5. **Connection direction**: The blockchain example shows how to use IsOutbound() to determine protocol roles (initiator vs responder).
+
+---
