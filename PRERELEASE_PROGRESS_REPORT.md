@@ -1085,3 +1085,134 @@ cfg := glueberry.NewConfig(
 5. **Metrics for observability**: Flow control events are tracked via the Metrics interface, allowing operators to monitor backpressure in production.
 
 ---
+
+## Phase: P2-3 - Handshake Robustness
+
+**Status**: ✅ Completed
+**Priority**: P1 (Production Readiness)
+
+### Summary
+
+Implemented a handshake state machine utility type that applications can use to track handshake progress and implement retry logic. This helps prevent hangs when handshake messages are lost (such as HelloFinalize in the Blockberry integration).
+
+### Files Created
+
+- `handshake_state.go` - HandshakeStateMachine type and HandshakeState enum
+- `handshake_state_test.go` - Comprehensive tests for state machine
+
+### Key Functionality Implemented
+
+1. **HandshakeState enum**:
+   - `HandshakeStateInit` - Initial state
+   - `HandshakeStateSentRequest` - Request sent, awaiting response
+   - `HandshakeStateReceivedResponse` - Response received
+   - `HandshakeStateSentFinalize` - Final message sent
+   - `HandshakeStateComplete` - Handshake successful
+   - `HandshakeStateFailed` - Handshake failed
+
+2. **HandshakeStateMachine**:
+   - Tracks current state with valid transition enforcement
+   - Retry counting with configurable max retries
+   - Thread-safe for concurrent access
+   - Error tracking for failed handshakes
+   - Duration tracking for metrics
+
+3. **State Machine Methods**:
+   - `Transition(to)` - Attempt state transition
+   - `TransitionWithRetry(to)` - Transition with retry tracking
+   - `Fail(err)` - Mark handshake as failed
+   - `CanRetry()` - Check if retries available
+   - `IsComplete()`, `IsFailed()`, `IsTerminal()` - State queries
+   - `Reset()` - Reset for retry from scratch
+
+4. **Valid Transitions**:
+   - Init → SentRequest, Failed
+   - SentRequest → ReceivedResponse, SentRequest (retry), Failed
+   - ReceivedResponse → SentFinalize, ReceivedResponse (retry), Failed
+   - SentFinalize → Complete, SentFinalize (retry), Failed
+
+5. **Error Types**:
+   - `ErrInvalidStateTransition` - Invalid transition attempted
+   - `ErrHandshakeMaxRetries` - Max retries exceeded
+
+### Test Coverage
+
+- `TestHandshakeState_String` - State string formatting
+- `TestNewHandshakeStateMachine` - Initialization
+- `TestNewHandshakeStateMachine_NegativeRetries` - Edge case
+- `TestHandshakeStateMachine_ValidTransitions` - Valid transition sequences
+- `TestHandshakeStateMachine_InvalidTransitions` - Invalid transitions rejected
+- `TestHandshakeStateMachine_TransitionWithRetry` - Retry counting and limits
+- `TestHandshakeStateMachine_Fail` - Failure handling
+- `TestHandshakeStateMachine_CanRetry` - Retry availability
+- `TestHandshakeStateMachine_CanRetry_TerminalStates` - Terminal state behavior
+- `TestHandshakeStateMachine_Reset` - Reset functionality
+- `TestHandshakeStateMachine_Duration` - Duration tracking
+- `TestHandshakeStateMachine_IsTerminal` - Terminal state detection
+- `TestHandshakeStateMachine_TransitionToFailed` - Fail from any state
+- `TestHandshakeStateMachine_Concurrent` - Thread safety
+
+All tests pass with race detection enabled.
+
+### Usage Example
+
+```go
+// Create state machine with 3 retries
+hsm := glueberry.NewHandshakeStateMachine(3)
+
+// Track handshake progress
+func doHandshake(node *glueberry.Node, peerID peer.ID, hsm *glueberry.HandshakeStateMachine) error {
+    // Send request
+    if err := hsm.Transition(glueberry.HandshakeStateSentRequest); err != nil {
+        return err
+    }
+    if err := sendHelloRequest(peerID); err != nil {
+        hsm.Fail(err)
+        return err
+    }
+
+    // Receive response
+    response, err := receiveHelloResponse(peerID)
+    if err != nil {
+        // Timeout? Try retrying the request
+        if hsm.CanRetry() {
+            hsm.TransitionWithRetry(glueberry.HandshakeStateSentRequest)
+            // ... retry logic
+        }
+        hsm.Fail(err)
+        return err
+    }
+    hsm.Transition(glueberry.HandshakeStateReceivedResponse)
+
+    // Send finalize
+    if err := hsm.Transition(glueberry.HandshakeStateSentFinalize); err != nil {
+        return err
+    }
+    if err := sendHelloFinalize(peerID); err != nil {
+        hsm.Fail(err)
+        return err
+    }
+
+    // Complete
+    if err := hsm.Transition(glueberry.HandshakeStateComplete); err != nil {
+        return err
+    }
+
+    log.Printf("Handshake completed in %v with %d retries", hsm.Duration(), hsm.Retries())
+    return nil
+}
+```
+
+### Design Decisions
+
+1. **App-level state machine**: Since Glueberry's handshake is app-controlled, the state machine is a utility type that apps can optionally use. It doesn't change the fundamental handshake model.
+
+2. **Self-transition for retries**: Transitioning to the same state counts as a retry. This allows simple retry logic: `hsm.TransitionWithRetry(currentState)`.
+
+3. **Max retries enforcement**: When max retries is exceeded, the state automatically transitions to Failed. This prevents infinite retry loops.
+
+4. **Thread-safe design**: All state access is mutex-protected, allowing the state machine to be shared across goroutines (e.g., timeout goroutine and main handshake goroutine).
+
+5. **Reset capability**: Failed handshakes can be reset and retried from scratch, useful for reconnection scenarios.
+
+---
