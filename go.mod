@@ -4,7 +4,7 @@ go 1.25.6
 
 require (
 	filippo.io/edwards25519 v1.1.0
-	github.com/blockberries/cramberry v0.0.0
+	github.com/blockberries/cramberry v1.2.0
 	github.com/libp2p/go-libp2p v0.46.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/stretchr/testify v1.11.1
@@ -98,5 +98,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
-
-replace github.com/blockberries/cramberry => ../cramberry
