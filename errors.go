@@ -57,6 +57,12 @@ const (
 
 	// ErrCodeVersionMismatch indicates incompatible protocol versions.
 	ErrCodeVersionMismatch
+
+	// ErrCodeMessageTooLarge indicates the message exceeds the maximum size.
+	ErrCodeMessageTooLarge
+
+	// ErrCodeBackpressure indicates the operation was blocked by flow control.
+	ErrCodeBackpressure
 )
 
 // String returns a human-readable name for the error code.
@@ -92,6 +98,10 @@ func (c ErrorCode) String() string {
 		return "NodeAlreadyStarted"
 	case ErrCodeVersionMismatch:
 		return "VersionMismatch"
+	case ErrCodeMessageTooLarge:
+		return "MessageTooLarge"
+	case ErrCodeBackpressure:
+		return "Backpressure"
 	default:
 		return fmt.Sprintf("ErrorCode(%d)", c)
 	}
@@ -291,6 +301,15 @@ var (
 var (
 	// ErrVersionMismatch indicates incompatible protocol versions.
 	ErrVersionMismatch = errors.New("incompatible protocol version")
+)
+
+// Sentinel errors for flow control.
+var (
+	// ErrMessageTooLarge indicates the message exceeds the maximum allowed size.
+	ErrMessageTooLarge = errors.New("message exceeds maximum size")
+
+	// ErrBackpressureTimeout indicates the send timed out due to backpressure.
+	ErrBackpressureTimeout = errors.New("send blocked by backpressure")
 )
 
 // Sentinel errors for node operations.

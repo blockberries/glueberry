@@ -943,3 +943,145 @@ if err != nil {
 4. **Application-level checking**: The library provides the tools but doesn't enforce version checking. Applications can decide whether to reject connections, warn, or accept incompatible versions.
 
 ---
+
+## Phase: P2-1 - Flow Control and Backpressure
+
+**Status**: ✅ Completed
+**Priority**: P1 (Production Readiness)
+
+### Summary
+
+Implemented flow control and backpressure to prevent overwhelming peers or buffers when sending messages. The system uses high/low watermark thresholds to block sends when too many messages are pending, and automatically unblocks when the backlog is processed.
+
+### Files Created
+
+- `internal/flow/controller.go` - FlowController type with acquire/release semantics
+- `internal/flow/controller_test.go` - Comprehensive tests for flow controller
+- `flow_control_test.go` - Tests for config options and error codes
+
+### Files Modified
+
+- `config.go`:
+  - Added `DefaultHighWatermark`, `DefaultLowWatermark`, `DefaultMaxMessageSize` constants
+  - Added `HighWatermark`, `LowWatermark`, `MaxMessageSize`, `DisableBackpressure` fields to Config
+  - Added validation for flow control config values
+  - Added `WithHighWatermark()`, `WithLowWatermark()`, `WithMaxMessageSize()`, `WithBackpressureDisabled()` options
+
+- `errors.go`:
+  - Added `ErrCodeMessageTooLarge` and `ErrCodeBackpressure` error codes
+  - Added `ErrMessageTooLarge` and `ErrBackpressureTimeout` sentinel errors
+
+- `metrics.go`:
+  - Added `BackpressureEngaged(stream)` method for backpressure events
+  - Added `BackpressureWait(stream, seconds)` method for wait time metrics
+  - Added `PendingMessages(stream, count)` method for pending message gauge
+
+- `node.go`:
+  - Added `flowControllers` map and mutex for per-stream flow control
+  - Updated `SendCtx()` to check max message size and apply flow control
+  - Added `getOrCreateFlowController()` method with metrics callbacks
+
+- `metrics_test.go`:
+  - Added fields and methods for new metrics to TestMetrics
+
+### Key Functionality Implemented
+
+1. **Flow Controller**:
+   - High/low watermark thresholds (default 1000/100 messages)
+   - Context-aware Acquire() with cancellation support
+   - Non-blocking Release() with automatic unblock
+   - Thread-safe with proper mutex handling
+
+2. **Per-Stream Flow Control**:
+   - Each stream name gets its own flow controller
+   - Flow controllers created lazily on first send
+   - Metrics callback on backpressure engagement
+
+3. **Max Message Size**:
+   - Default 1MB maximum message size
+   - Configurable via `WithMaxMessageSize()`
+   - Returns `ErrCodeMessageTooLarge` for oversized messages
+
+4. **Backpressure Configuration**:
+   - Enabled by default (`DisableBackpressure = false`)
+   - Can be disabled with `WithBackpressureDisabled()`
+   - Configurable watermarks via `WithHighWatermark()` and `WithLowWatermark()`
+
+5. **Metrics Integration**:
+   - `BackpressureEngaged(stream)` - counter for backpressure events
+   - `BackpressureWait(stream, seconds)` - histogram of wait times
+   - `PendingMessages(stream, count)` - gauge of pending messages
+
+### Test Coverage
+
+Flow Controller tests:
+- `TestNewController_Defaults` - Default watermark values
+- `TestNewController_CustomValues` - Custom watermark values
+- `TestNewController_LowWatermarkAdjustment` - Auto-adjustment when low >= high
+- `TestController_AcquireRelease_Basic` - Basic acquire/release
+- `TestController_BlocksAtHighWatermark` - Blocking at threshold
+- `TestController_UnblocksAtLowWatermark` - Unblocking at threshold
+- `TestController_ContextCancelled` - Cancellation support
+- `TestController_BlockedCallback` - Metrics callback
+- `TestController_Close` - Graceful shutdown
+- `TestController_Concurrent` - Thread safety
+
+Config tests:
+- `TestConfig_FlowControl_Defaults` - Default values
+- `TestConfig_FlowControl_Validate` - Validation of flow control fields
+- `TestWithHighWatermark`, `TestWithLowWatermark`, `TestWithMaxMessageSize` - Config options
+
+All tests pass with race detection enabled.
+
+### Usage Example
+
+```go
+// Configure custom flow control
+cfg := glueberry.NewConfig(
+    privateKey,
+    addressBookPath,
+    listenAddrs,
+    glueberry.WithHighWatermark(500),    // Block at 500 pending
+    glueberry.WithLowWatermark(50),      // Unblock at 50 pending
+    glueberry.WithMaxMessageSize(512*1024), // 512KB max
+)
+
+// Send with context timeout (backpressure-aware)
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+err := node.SendCtx(ctx, peerID, "data", message)
+if err != nil {
+    var gErr *glueberry.Error
+    if errors.As(err, &gErr) {
+        switch gErr.Code {
+        case glueberry.ErrCodeMessageTooLarge:
+            log.Printf("Message too large: %s", gErr.Message)
+        case glueberry.ErrCodeBackpressure:
+            log.Printf("Send blocked by backpressure, retry later")
+        }
+    }
+}
+
+// Disable backpressure for fire-and-forget scenarios
+cfg := glueberry.NewConfig(
+    privateKey,
+    addressBookPath,
+    listenAddrs,
+    glueberry.WithBackpressureDisabled(),
+)
+```
+
+### Design Decisions
+
+1. **Per-stream flow control**: Each stream has its own flow controller, allowing different streams to have independent backpressure. This prevents a slow stream from blocking all communication.
+
+2. **High/low watermark**: Using two thresholds prevents oscillation (thrashing). Sends block at high watermark and unblock at low watermark, providing hysteresis.
+
+3. **Backpressure enabled by default**: Production systems should have backpressure to prevent resource exhaustion. Applications can opt-out if needed.
+
+4. **Context-aware blocking**: The Acquire() method respects context deadlines and cancellation, allowing applications to set timeouts on send operations.
+
+5. **Metrics for observability**: Flow control events are tracked via the Metrics interface, allowing operators to monitor backpressure in production.
+
+---

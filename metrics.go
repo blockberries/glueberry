@@ -72,6 +72,20 @@ type Metrics interface {
 
 	// MessageDropped records a message being dropped due to buffer full.
 	MessageDropped()
+
+	// Flow control metrics
+
+	// BackpressureEngaged records when backpressure is engaged for a stream.
+	// Labels: stream (the stream name)
+	BackpressureEngaged(stream string)
+
+	// BackpressureWait records how long a send waited due to backpressure.
+	// Labels: stream (the stream name)
+	BackpressureWait(stream string, seconds float64)
+
+	// PendingMessages records the current number of pending messages for a stream.
+	// Labels: stream (the stream name)
+	PendingMessages(stream string, count int)
 }
 
 // NopMetrics is a no-op metrics implementation that discards all metrics.
@@ -125,3 +139,12 @@ func (NopMetrics) EventDropped() {}
 
 // MessageDropped implements Metrics.MessageDropped (no-op).
 func (NopMetrics) MessageDropped() {}
+
+// BackpressureEngaged implements Metrics.BackpressureEngaged (no-op).
+func (NopMetrics) BackpressureEngaged(stream string) {}
+
+// BackpressureWait implements Metrics.BackpressureWait (no-op).
+func (NopMetrics) BackpressureWait(stream string, seconds float64) {}
+
+// PendingMessages implements Metrics.PendingMessages (no-op).
+func (NopMetrics) PendingMessages(stream string, count int) {}

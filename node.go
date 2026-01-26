@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/blockberries/glueberry/internal/eventdispatch"
+	"github.com/blockberries/glueberry/internal/flow"
 	"github.com/blockberries/glueberry/pkg/addressbook"
 	"github.com/blockberries/glueberry/pkg/connection"
 	"github.com/blockberries/glueberry/pkg/crypto"
@@ -47,6 +49,10 @@ type Node struct {
 	// Stats tracking
 	peerStats   map[peer.ID]*PeerStatsTracker
 	peerStatsMu sync.RWMutex
+
+	// Flow control
+	flowControllers   map[string]*flow.Controller
+	flowControllersMu sync.RWMutex
 
 	// Lifecycle
 	ctx     context.Context
@@ -139,23 +145,24 @@ func New(cfg *Config) (*Node, error) {
 	gater.SetStateChecker(connMgr)
 
 	node := &Node{
-		config:         cfg,
-		logger:         cfg.Logger,
-		metrics:        cfg.Metrics,
-		crypto:         cryptoModule,
-		addressBook:    addrBook,
-		host:           libp2pHost,
-		connections:    connMgr,
-		streamManager:  streamMgr,
-		eventDispatch:  dispatcher,
-		internalEvents: dispatcher.Events(),
-		events:         externalEventsChan,
-		internalMsgs:   internalMsgsChan,
-		messages:       externalMsgsChan,
-		peerStats:      make(map[peer.ID]*PeerStatsTracker),
-		ctx:            ctx,
-		cancel:         cancel,
-		started:        false,
+		config:          cfg,
+		logger:          cfg.Logger,
+		metrics:         cfg.Metrics,
+		crypto:          cryptoModule,
+		addressBook:     addrBook,
+		host:            libp2pHost,
+		connections:     connMgr,
+		streamManager:   streamMgr,
+		eventDispatch:   dispatcher,
+		internalEvents:  dispatcher.Events(),
+		events:          externalEventsChan,
+		internalMsgs:    internalMsgsChan,
+		messages:        externalMsgsChan,
+		peerStats:       make(map[peer.ID]*PeerStatsTracker),
+		flowControllers: make(map[string]*flow.Controller),
+		ctx:             ctx,
+		cancel:          cancel,
+		started:         false,
 	}
 
 	// Start forwarding goroutines
@@ -604,6 +611,48 @@ func (n *Node) SendCtx(ctx context.Context, peerID peer.ID, streamName string, d
 	}
 	n.startMu.Unlock()
 
+	// Check max message size
+	if n.config.MaxMessageSize > 0 && len(data) > n.config.MaxMessageSize {
+		return &Error{
+			Code:    ErrCodeMessageTooLarge,
+			Message: fmt.Sprintf("message size %d exceeds maximum %d", len(data), n.config.MaxMessageSize),
+			PeerID:  peerID,
+			Stream:  streamName,
+		}
+	}
+
+	// Apply flow control if enabled (default is enabled, DisableBackpressure = false)
+	if !n.config.DisableBackpressure {
+		fc := n.getOrCreateFlowController(streamName)
+
+		startWait := time.Now()
+		if err := fc.Acquire(ctx); err != nil {
+			if err == context.DeadlineExceeded || err == context.Canceled {
+				return &Error{
+					Code:      ErrCodeBackpressure,
+					Message:   "send blocked by backpressure",
+					PeerID:    peerID,
+					Stream:    streamName,
+					Cause:     err,
+					Retriable: true,
+				}
+			}
+			return err
+		}
+
+		// Record backpressure wait time if we waited
+		waitTime := time.Since(startWait)
+		if waitTime > time.Millisecond {
+			n.metrics.BackpressureWait(streamName, waitTime.Seconds())
+		}
+
+		// Release after send (success or failure)
+		defer func() {
+			fc.Release()
+			n.metrics.PendingMessages(streamName, fc.Pending())
+		}()
+	}
+
 	err := n.streamManager.SendCtx(ctx, peerID, streamName, data)
 	if err == nil {
 		// Record stats on successful send
@@ -674,6 +723,38 @@ func (n *Node) getOrCreatePeerStats(peerID peer.ID) *PeerStatsTracker {
 		n.peerStats[peerID] = tracker
 	}
 	return tracker
+}
+
+// getOrCreateFlowController returns the flow controller for a stream,
+// creating one if it doesn't exist.
+func (n *Node) getOrCreateFlowController(streamName string) *flow.Controller {
+	// Fast path: check if controller exists
+	n.flowControllersMu.RLock()
+	fc := n.flowControllers[streamName]
+	n.flowControllersMu.RUnlock()
+
+	if fc != nil {
+		return fc
+	}
+
+	// Slow path: create controller under write lock
+	n.flowControllersMu.Lock()
+	defer n.flowControllersMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if fc = n.flowControllers[streamName]; fc != nil {
+		return fc
+	}
+
+	fc = flow.NewController(n.config.HighWatermark, n.config.LowWatermark)
+
+	// Set up metrics callback for backpressure events
+	fc.SetBlockedCallback(func() {
+		n.metrics.BackpressureEngaged(streamName)
+	})
+
+	n.flowControllers[streamName] = fc
+	return fc
 }
 
 // forwardMessagesWithStats reads from internal messages channel,

@@ -17,6 +17,9 @@ const (
 	DefaultFailedHandshakeCooldown = 1 * time.Minute
 	DefaultEventBufferSize         = 100
 	DefaultMessageBufferSize       = 1000
+	DefaultHighWatermark           = 1000    // Messages per stream before backpressure
+	DefaultLowWatermark            = 100     // Messages per stream to resume sending
+	DefaultMaxMessageSize          = 1 << 20 // 1MB max message size
 )
 
 // Config holds the configuration for a Glueberry node.
@@ -67,6 +70,26 @@ type Config struct {
 	// Metrics is the metrics collector for the node. If nil, a NopMetrics is used.
 	// The metrics collector must be safe for concurrent use.
 	Metrics Metrics
+
+	// HighWatermark is the number of pending messages per stream before
+	// backpressure engages. When reached, Send operations will block until
+	// messages are acknowledged. Set to 0 to use DefaultHighWatermark.
+	HighWatermark int
+
+	// LowWatermark is the number of pending messages per stream at which
+	// backpressure disengages, allowing sends to proceed again.
+	// Set to 0 to use DefaultLowWatermark.
+	LowWatermark int
+
+	// MaxMessageSize is the maximum size in bytes of a single message.
+	// Messages exceeding this size will be rejected. Set to 0 to use
+	// DefaultMaxMessageSize (1MB).
+	MaxMessageSize int
+
+	// DisableBackpressure controls whether flow control is disabled.
+	// When false (default), sends will block when the high watermark is reached.
+	// When true, backpressure is disabled and messages may be dropped if buffers are full.
+	DisableBackpressure bool
 }
 
 // Validate checks that the configuration is valid and returns an error
@@ -109,6 +132,18 @@ func (c *Config) Validate() error {
 	if c.MessageBufferSize < 0 {
 		return fmt.Errorf("%w: message buffer size cannot be negative", ErrInvalidConfig)
 	}
+	if c.HighWatermark < 0 {
+		return fmt.Errorf("%w: high watermark cannot be negative", ErrInvalidConfig)
+	}
+	if c.LowWatermark < 0 {
+		return fmt.Errorf("%w: low watermark cannot be negative", ErrInvalidConfig)
+	}
+	if c.LowWatermark > 0 && c.HighWatermark > 0 && c.LowWatermark >= c.HighWatermark {
+		return fmt.Errorf("%w: low watermark must be less than high watermark", ErrInvalidConfig)
+	}
+	if c.MaxMessageSize < 0 {
+		return fmt.Errorf("%w: max message size cannot be negative", ErrInvalidConfig)
+	}
 	return nil
 }
 
@@ -140,6 +175,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Metrics == nil {
 		c.Metrics = NopMetrics{}
+	}
+	if c.HighWatermark == 0 {
+		c.HighWatermark = DefaultHighWatermark
+	}
+	if c.LowWatermark == 0 {
+		c.LowWatermark = DefaultLowWatermark
+	}
+	if c.MaxMessageSize == 0 {
+		c.MaxMessageSize = DefaultMaxMessageSize
 	}
 }
 
@@ -209,6 +253,37 @@ func WithLogger(l Logger) ConfigOption {
 func WithMetrics(m Metrics) ConfigOption {
 	return func(c *Config) {
 		c.Metrics = m
+	}
+}
+
+// WithHighWatermark sets the high watermark for flow control.
+// When the number of pending messages reaches this value, new sends will block.
+func WithHighWatermark(n int) ConfigOption {
+	return func(c *Config) {
+		c.HighWatermark = n
+	}
+}
+
+// WithLowWatermark sets the low watermark for flow control.
+// When the number of pending messages drops to this value, blocked sends can proceed.
+func WithLowWatermark(n int) ConfigOption {
+	return func(c *Config) {
+		c.LowWatermark = n
+	}
+}
+
+// WithMaxMessageSize sets the maximum size of a single message in bytes.
+func WithMaxMessageSize(n int) ConfigOption {
+	return func(c *Config) {
+		c.MaxMessageSize = n
+	}
+}
+
+// WithBackpressureDisabled disables flow control backpressure.
+// When disabled, sends will not block when buffers are full.
+func WithBackpressureDisabled() ConfigOption {
+	return func(c *Config) {
+		c.DisableBackpressure = true
 	}
 }
 

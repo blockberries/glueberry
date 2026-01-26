@@ -34,46 +34,55 @@ func TestNopMetrics_Methods_DoNotPanic(t *testing.T) {
 	m.EventEmitted("connected")
 	m.EventDropped()
 	m.MessageDropped()
+	m.BackpressureEngaged("data")
+	m.BackpressureWait("data", 0.5)
+	m.PendingMessages("data", 100)
 }
 
 // TestMetrics is a test metrics implementation that records calls.
 type TestMetrics struct {
 	mu sync.Mutex
 
-	ConnectionsOpened  map[string]int
-	ConnectionsClosed  map[string]int
-	ConnectionAttempts map[string]int
-	HandshakeDurations []float64
-	HandshakeResults   map[string]int
-	MessagesSent       map[string]int
-	BytesSent          map[string]int
-	MessagesReceived   map[string]int
-	BytesReceived      map[string]int
-	StreamsOpened      map[string]int
-	StreamsClosed      map[string]int
-	EncryptionErrors   int
-	DecryptionErrors   int
-	KeyDerivations     map[bool]int
-	EventsEmitted      map[string]int
-	EventsDropped      int
-	MessagesDropped    int
+	ConnectionsOpened    map[string]int
+	ConnectionsClosed    map[string]int
+	ConnectionAttempts   map[string]int
+	HandshakeDurations   []float64
+	HandshakeResults     map[string]int
+	MessagesSent         map[string]int
+	BytesSent            map[string]int
+	MessagesReceived     map[string]int
+	BytesReceived        map[string]int
+	StreamsOpened        map[string]int
+	StreamsClosed        map[string]int
+	EncryptionErrors     int
+	DecryptionErrors     int
+	KeyDerivations       map[bool]int
+	EventsEmitted        map[string]int
+	EventsDropped        int
+	MessagesDropped      int
+	BackpressureEvents   map[string]int
+	BackpressureWaits    map[string][]float64
+	PendingMessagesGauge map[string]int
 }
 
 func NewTestMetrics() *TestMetrics {
 	return &TestMetrics{
-		ConnectionsOpened:  make(map[string]int),
-		ConnectionsClosed:  make(map[string]int),
-		ConnectionAttempts: make(map[string]int),
-		HandshakeDurations: make([]float64, 0),
-		HandshakeResults:   make(map[string]int),
-		MessagesSent:       make(map[string]int),
-		BytesSent:          make(map[string]int),
-		MessagesReceived:   make(map[string]int),
-		BytesReceived:      make(map[string]int),
-		StreamsOpened:      make(map[string]int),
-		StreamsClosed:      make(map[string]int),
-		KeyDerivations:     make(map[bool]int),
-		EventsEmitted:      make(map[string]int),
+		ConnectionsOpened:    make(map[string]int),
+		ConnectionsClosed:    make(map[string]int),
+		ConnectionAttempts:   make(map[string]int),
+		HandshakeDurations:   make([]float64, 0),
+		HandshakeResults:     make(map[string]int),
+		MessagesSent:         make(map[string]int),
+		BytesSent:            make(map[string]int),
+		MessagesReceived:     make(map[string]int),
+		BytesReceived:        make(map[string]int),
+		StreamsOpened:        make(map[string]int),
+		StreamsClosed:        make(map[string]int),
+		KeyDerivations:       make(map[bool]int),
+		EventsEmitted:        make(map[string]int),
+		BackpressureEvents:   make(map[string]int),
+		BackpressureWaits:    make(map[string][]float64),
+		PendingMessagesGauge: make(map[string]int),
 	}
 }
 
@@ -167,6 +176,24 @@ func (m *TestMetrics) MessageDropped() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.MessagesDropped++
+}
+
+func (m *TestMetrics) BackpressureEngaged(stream string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.BackpressureEvents[stream]++
+}
+
+func (m *TestMetrics) BackpressureWait(stream string, seconds float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.BackpressureWaits[stream] = append(m.BackpressureWaits[stream], seconds)
+}
+
+func (m *TestMetrics) PendingMessages(stream string, count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.PendingMessagesGauge[stream] = count
 }
 
 func TestTestMetrics_RecordsCalls(t *testing.T) {
