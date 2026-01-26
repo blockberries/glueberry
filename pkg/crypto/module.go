@@ -118,16 +118,24 @@ func (m *Module) DeriveSharedKeyFromX25519(remoteX25519 []byte) ([]byte, error) 
 
 // RemovePeerKey removes a cached shared key for a peer.
 // This should be called when disconnecting from a peer.
+// The key is securely zeroed before being removed from the cache.
 func (m *Module) RemovePeerKey(remoteX25519 []byte) {
 	cacheKey := string(remoteX25519)
 	m.peerKeysMu.Lock()
+	if key, ok := m.peerKeys[cacheKey]; ok {
+		SecureZero(key)
+	}
 	delete(m.peerKeys, cacheKey)
 	m.peerKeysMu.Unlock()
 }
 
 // ClearPeerKeys removes all cached shared keys.
+// All keys are securely zeroed before being removed from the cache.
 func (m *Module) ClearPeerKeys() {
 	m.peerKeysMu.Lock()
+	for _, key := range m.peerKeys {
+		SecureZero(key)
+	}
 	m.peerKeys = make(map[string][]byte)
 	m.peerKeysMu.Unlock()
 }
@@ -170,4 +178,19 @@ func (m *Module) EncryptWithKey(key, plaintext []byte) ([]byte, error) {
 // This is useful when the caller manages keys directly.
 func (m *Module) DecryptWithKey(key, ciphertext []byte) ([]byte, error) {
 	return Decrypt(key, ciphertext, nil)
+}
+
+// Close securely zeros all key material and clears the peer key cache.
+// This should be called when the Module is no longer needed.
+// After Close is called, the Module should not be used.
+func (m *Module) Close() {
+	// Clear all cached peer keys first
+	m.ClearPeerKeys()
+
+	// Zero the private keys
+	// Note: ed25519.PrivateKey is []byte, so we can zero it directly
+	SecureZero(m.ed25519Private)
+	SecureZero(m.x25519Private)
+
+	// Note: We don't zero public keys as they are not sensitive
 }

@@ -195,6 +195,10 @@ func (es *EncryptedStream) Close() error {
 }
 
 // markClosed marks the stream as closed with the given error.
+// Note: The shared key is NOT zeroed here because:
+// 1. The key is owned by the Manager, which handles zeroing in CloseStreams/Shutdown
+// 2. Multiple streams may share the same key reference
+// 3. The cipher has its own internal copy of the key
 func (es *EncryptedStream) markClosed(err error) {
 	es.closeMu.Lock()
 	defer es.closeMu.Unlock()

@@ -59,6 +59,14 @@ type Config struct {
 
 	// MessageBufferSize is the buffer size for the incoming messages channel.
 	MessageBufferSize int
+
+	// Logger is the logger for the node. If nil, a NopLogger is used.
+	// The logger must be safe for concurrent use.
+	Logger Logger
+
+	// Metrics is the metrics collector for the node. If nil, a NopMetrics is used.
+	// The metrics collector must be safe for concurrent use.
+	Metrics Metrics
 }
 
 // Validate checks that the configuration is valid and returns an error
@@ -127,6 +135,12 @@ func (c *Config) applyDefaults() {
 	if c.MessageBufferSize == 0 {
 		c.MessageBufferSize = DefaultMessageBufferSize
 	}
+	if c.Logger == nil {
+		c.Logger = NopLogger{}
+	}
+	if c.Metrics == nil {
+		c.Metrics = NopMetrics{}
+	}
 }
 
 // ConfigOption is a functional option for configuring a Node.
@@ -179,6 +193,22 @@ func WithEventBufferSize(size int) ConfigOption {
 func WithMessageBufferSize(size int) ConfigOption {
 	return func(c *Config) {
 		c.MessageBufferSize = size
+	}
+}
+
+// WithLogger sets the logger for the node.
+// The logger must be safe for concurrent use.
+func WithLogger(l Logger) ConfigOption {
+	return func(c *Config) {
+		c.Logger = l
+	}
+}
+
+// WithMetrics sets the metrics collector for the node.
+// The metrics collector must be safe for concurrent use.
+func WithMetrics(m Metrics) ConfigOption {
+	return func(c *Config) {
+		c.Metrics = m
 	}
 }
 

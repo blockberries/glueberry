@@ -18,6 +18,10 @@ type PeerConnection struct {
 	// State is the current connection state.
 	State ConnectionState
 
+	// IsOutbound indicates whether we initiated this connection (true) or
+	// if it was initiated by the remote peer (false).
+	IsOutbound bool
+
 	// HandshakeTimer tracks the handshake timeout.
 	// Set when connection reaches StateConnected.
 	HandshakeTimer *time.Timer
@@ -127,6 +131,20 @@ func (pc *PeerConnection) GetSharedKey() []byte {
 	return key
 }
 
+// GetIsOutbound returns whether this connection was initiated by us.
+func (pc *PeerConnection) GetIsOutbound() bool {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	return pc.IsOutbound
+}
+
+// SetIsOutbound sets whether this connection was initiated by us.
+func (pc *PeerConnection) SetIsOutbound(outbound bool) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.IsOutbound = outbound
+}
+
 // SetError stores an error associated with this connection.
 func (pc *PeerConnection) SetError(err error) {
 	pc.mu.Lock()
@@ -186,6 +204,7 @@ func (pc *PeerConnection) CooldownRemaining() time.Duration {
 }
 
 // Cleanup releases all resources associated with this connection.
+// Sensitive key material is securely zeroed before being released.
 func (pc *PeerConnection) Cleanup() {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
@@ -202,8 +221,13 @@ func (pc *PeerConnection) Cleanup() {
 		pc.HandshakeCancel = nil
 	}
 
-	// Clear shared key
-	pc.SharedKey = nil
+	// Securely zero and clear shared key
+	if pc.SharedKey != nil {
+		for i := range pc.SharedKey {
+			pc.SharedKey[i] = 0
+		}
+		pc.SharedKey = nil
+	}
 
 	// Clear encrypted streams (will be properly closed by stream manager)
 	pc.EncryptedStreams = make(map[string]any)

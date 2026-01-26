@@ -236,3 +236,69 @@ func TestPeerConnection_ConcurrentAccess(t *testing.T) {
 	<-done
 	<-done
 }
+
+func TestNewPeerConnection_IsOutbound_DefaultFalse(t *testing.T) {
+	peerID := mustParsePeerID(t, testPeerID)
+	conn := NewPeerConnection(peerID)
+
+	// Default should be false (not outbound)
+	if conn.IsOutbound {
+		t.Error("new PeerConnection should have IsOutbound = false by default")
+	}
+	if conn.GetIsOutbound() {
+		t.Error("GetIsOutbound should return false for new connection")
+	}
+}
+
+func TestPeerConnection_SetIsOutbound(t *testing.T) {
+	peerID := mustParsePeerID(t, testPeerID)
+	conn := NewPeerConnection(peerID)
+
+	// Set to true (outbound)
+	conn.SetIsOutbound(true)
+	if !conn.GetIsOutbound() {
+		t.Error("GetIsOutbound should return true after SetIsOutbound(true)")
+	}
+
+	// Set to false (inbound)
+	conn.SetIsOutbound(false)
+	if conn.GetIsOutbound() {
+		t.Error("GetIsOutbound should return false after SetIsOutbound(false)")
+	}
+}
+
+func TestPeerConnection_IsOutbound_ConcurrentAccess(t *testing.T) {
+	peerID := mustParsePeerID(t, testPeerID)
+	conn := NewPeerConnection(peerID)
+
+	done := make(chan bool)
+
+	// Goroutine 1: Set true
+	go func() {
+		for i := 0; i < 100; i++ {
+			conn.SetIsOutbound(true)
+		}
+		done <- true
+	}()
+
+	// Goroutine 2: Set false
+	go func() {
+		for i := 0; i < 100; i++ {
+			conn.SetIsOutbound(false)
+		}
+		done <- true
+	}()
+
+	// Goroutine 3: Get
+	go func() {
+		for i := 0; i < 100; i++ {
+			conn.GetIsOutbound()
+		}
+		done <- true
+	}()
+
+	// Wait for all - test should complete without race detector issues
+	<-done
+	<-done
+	<-done
+}

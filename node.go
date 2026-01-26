@@ -22,7 +22,9 @@ import (
 //
 // All public methods are thread-safe.
 type Node struct {
-	config *Config
+	config  *Config
+	logger  Logger
+	metrics Metrics
 
 	// Core components
 	crypto        *crypto.Module
@@ -114,6 +116,8 @@ func New(cfg *Config) (*Node, error) {
 
 	return &Node{
 		config:        cfg,
+		logger:        cfg.Logger,
+		metrics:       cfg.Metrics,
 		crypto:        cryptoModule,
 		addressBook:   addrBook,
 		host:          libp2pHost,
@@ -146,6 +150,13 @@ func (n *Node) Start() error {
 	// because we need the shared key which is only available after handshake
 
 	n.started = true
+
+	// Log node started
+	addrs := make([]string, len(n.host.Addrs()))
+	for i, addr := range n.host.Addrs() {
+		addrs[i] = addr.String()
+	}
+	n.logger.Info("node started", "peer_id", n.host.ID().String(), "listen_addrs", addrs)
 
 	// Auto-connect to all peers in address book
 	n.autoConnectToPeers()
@@ -189,6 +200,8 @@ func (n *Node) Stop() error {
 		return ErrNodeNotStarted
 	}
 
+	n.logger.Info("node stopping", "peer_id", n.host.ID().String())
+
 	// Cancel context to stop all goroutines
 	n.cancel()
 
@@ -197,15 +210,21 @@ func (n *Node) Stop() error {
 	n.streamManager.Shutdown()
 	n.eventDispatch.Close()
 
-	// Close libp2p host
+	// Close libp2p host first (before zeroing keys it might still reference)
 	if err := n.host.Close(); err != nil {
+		n.logger.Error("failed to close host", "error", err)
 		return fmt.Errorf("failed to close host: %w", err)
 	}
+
+	// Close crypto module to zero key material (after libp2p is fully stopped)
+	n.crypto.Close()
 
 	// Close messages channel
 	close(n.messages)
 
 	n.started = false
+
+	n.logger.Info("node stopped")
 
 	return nil
 }
@@ -232,6 +251,8 @@ func (n *Node) AddPeer(peerID peer.ID, addrs []multiaddr.Multiaddr, metadata map
 		return err
 	}
 
+	n.logger.Info("peer added", "peer_id", peerID.String())
+
 	// Auto-connect if node is started
 	n.startMu.Lock()
 	started := n.started
@@ -257,6 +278,8 @@ func (n *Node) BlacklistPeer(peerID peer.ID) error {
 	if err := n.addressBook.BlacklistPeer(peerID); err != nil {
 		return err
 	}
+
+	n.logger.Warn("peer blacklisted", "peer_id", peerID.String())
 
 	// Disconnect if currently connected
 	if n.connections.GetState(peerID).IsActive() {
@@ -340,9 +363,12 @@ func (n *Node) PrepareStreams(
 		return ErrNoStreamsRequested
 	}
 
+	n.logger.Debug("preparing streams", "peer_id", peerID.String(), "streams", streamNames)
+
 	// 1. Derive shared key
 	sharedKey, err := n.crypto.DeriveSharedKey(peerPubKey)
 	if err != nil {
+		n.logger.Warn("handshake failed: key derivation error", "peer_id", peerID.String(), "error", err)
 		return fmt.Errorf("failed to derive shared key: %w", err)
 	}
 
@@ -394,6 +420,8 @@ func (n *Node) FinalizeHandshake(peerID peer.ID) error {
 		return fmt.Errorf("failed to mark connection as established: %w", err)
 	}
 
+	n.logger.Info("handshake complete", "peer_id", peerID.String())
+
 	return nil
 }
 
@@ -415,6 +443,15 @@ func (n *Node) CompleteHandshake(
 // ConnectionState returns the current connection state for a peer.
 func (n *Node) ConnectionState(peerID peer.ID) ConnectionState {
 	return ConnectionState(n.connections.GetState(peerID))
+}
+
+// IsOutbound returns whether the connection to the peer was initiated by us (outbound)
+// or by the remote peer (inbound). Returns false and an error if no connection exists.
+//
+// This is useful for protocols that need to differentiate behavior based on who
+// initiated the connection (e.g., in Blockberry, the initiator sends HelloRequest first).
+func (n *Node) IsOutbound(peerID peer.ID) (bool, error) {
+	return n.connections.IsOutbound(peerID)
 }
 
 // CancelReconnection cancels any ongoing reconnection attempts for a peer.

@@ -127,6 +127,9 @@ func (m *Manager) Connect(peerID peer.ID) error {
 		m.connections[peerID] = conn
 	}
 
+	// Mark as outbound connection (we initiated it)
+	conn.SetIsOutbound(true)
+
 	// Transition to connecting
 	if err := conn.TransitionTo(StateConnecting); err != nil {
 		m.mu.Unlock()
@@ -612,6 +615,9 @@ func (m *Manager) GetOrCreateConnection(peerID peer.ID) *PeerConnection {
 func (m *Manager) RegisterIncomingConnection(peerID peer.ID) error {
 	conn := m.GetOrCreateConnection(peerID)
 
+	// Mark as inbound connection (they initiated it)
+	conn.SetIsOutbound(false)
+
 	// Transition through states to reach Connected
 	state := conn.GetState()
 
@@ -656,4 +662,18 @@ func (m *Manager) CancelHandshakeTimeout(peerID peer.ID) error {
 
 	conn.CancelHandshakeTimeout()
 	return nil
+}
+
+// IsOutbound returns whether the connection to the peer was initiated by us.
+// Returns false and an error if no connection exists for the peer.
+func (m *Manager) IsOutbound(peerID peer.ID) (bool, error) {
+	m.mu.RLock()
+	conn, exists := m.connections[peerID]
+	m.mu.RUnlock()
+
+	if !exists {
+		return false, fmt.Errorf("peer %s not connected", peerID)
+	}
+
+	return conn.GetIsOutbound(), nil
 }

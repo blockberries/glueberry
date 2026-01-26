@@ -349,6 +349,13 @@ func (m *Manager) CloseStreams(peerID peer.ID) error {
 
 	// Remove from other maps
 	delete(m.allowedStreams, peerID)
+
+	// Securely zero shared key before removing
+	if key, ok := m.sharedKeys[peerID]; ok {
+		for i := range key {
+			key[i] = 0
+		}
+	}
 	delete(m.sharedKeys, peerID)
 
 	return lastErr
@@ -449,6 +456,7 @@ func (m *Manager) HandleIncomingStream(
 }
 
 // Shutdown closes all streams and stops the manager.
+// All key material is securely zeroed before release.
 func (m *Manager) Shutdown() {
 	m.cancel()
 
@@ -466,6 +474,13 @@ func (m *Manager) Shutdown() {
 	for _, peerStreams := range m.unencryptedStreams {
 		for _, stream := range peerStreams {
 			stream.Close()
+		}
+	}
+
+	// Securely zero all shared keys before clearing the map
+	for _, key := range m.sharedKeys {
+		for i := range key {
+			key[i] = 0
 		}
 	}
 
