@@ -1594,3 +1594,69 @@ func TestMyApp(t *testing.T) {
 5. **Error injection**: Allows testing error handling paths by setting errors that will be returned.
 
 ---
+
+## Phase: P5-3 - Debug Utilities
+
+**Status**: ✅ Completed
+**Priority**: P2 (Developer Experience)
+
+### Summary
+
+Implemented debug utilities for troubleshooting Glueberry nodes. The utilities provide node state inspection in multiple formats (struct, JSON, human-readable).
+
+### Files Created
+
+- `debug.go` - Debug utilities implementation
+- `debug_test.go` - Comprehensive tests for debug utilities
+
+### Key Functionality Implemented
+
+1. **DumpState()** - Returns complete node state as a `DebugState` struct:
+   - Node identity (peer ID, public key)
+   - Listen addresses
+   - Protocol version
+   - Address book summary
+   - Configuration
+   - Statistics summary
+   - Flow controller states
+
+2. **DumpStateJSON()** - Returns node state as formatted JSON string
+
+3. **DumpStateString()** - Returns human-readable formatted state
+
+4. **ConnectionSummary()** - Returns brief summary of connection states
+
+5. **ListKnownPeers()** - Returns list of known peer IDs from address book
+
+6. **PeerInfo(peerID)** - Returns detailed info about a specific peer
+
+### Test Coverage
+
+Comprehensive tests for all debug utilities. All tests pass with race detection enabled.
+
+### Usage Example
+
+```go
+// Get structured state
+state := node.DumpState()
+fmt.Printf("Node %s has %d known peers\n", state.PeerID, state.AddressBook.ActivePeers)
+
+// Get JSON for logging or API responses
+jsonStr, _ := node.DumpStateJSON()
+log.Printf("Node state: %s", jsonStr)
+
+// Get human-readable output for CLI/debugging
+fmt.Println(node.DumpStateString())
+```
+
+### Design Decisions
+
+1. **Multiple output formats**: Provides struct, JSON, and string formats to suit different use cases.
+
+2. **Non-invasive**: Uses only public methods and existing state, doesn't affect node operation.
+
+3. **Thread-safe**: All state access is properly locked to prevent data races.
+
+4. **Timestamp included**: Each state capture includes a timestamp for correlation with logs.
+
+---
