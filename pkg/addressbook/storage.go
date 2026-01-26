@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 )
 
 const (
@@ -17,25 +18,76 @@ const (
 
 	// backupFileSuffix is appended when backing up corrupted files.
 	backupFileSuffix = ".bak"
+
+	// lockFileSuffix is appended to create a lock file for inter-process synchronization.
+	lockFileSuffix = ".lock"
 )
 
 // storage handles file persistence for the address book.
 type storage struct {
-	path string
-	mu   sync.Mutex
+	path     string
+	lockPath string
+	mu       sync.Mutex
 }
 
 // newStorage creates a new storage instance for the given file path.
 func newStorage(path string) *storage {
-	return &storage{path: path}
+	return &storage{
+		path:     path,
+		lockPath: path + lockFileSuffix,
+	}
+}
+
+// acquireFileLock acquires an exclusive file lock for inter-process synchronization.
+// Returns the lock file handle which must be passed to releaseFileLock.
+func (s *storage) acquireFileLock() (*os.File, error) {
+	// Ensure the directory exists
+	dir := filepath.Dir(s.lockPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create lock directory: %w", err)
+		}
+	}
+
+	// Open or create the lock file
+	lockFile, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open lock file: %w", err)
+	}
+
+	// Acquire exclusive lock (blocking)
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		lockFile.Close()
+		return nil, fmt.Errorf("failed to acquire file lock: %w", err)
+	}
+
+	return lockFile, nil
+}
+
+// releaseFileLock releases the file lock and closes the lock file.
+func (s *storage) releaseFileLock(lockFile *os.File) {
+	if lockFile == nil {
+		return
+	}
+	// Release the lock - ignore errors as we're in cleanup
+	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	lockFile.Close()
 }
 
 // load reads the address book from disk.
 // Returns an empty data structure if the file doesn't exist.
 // If the file is corrupted, it creates a backup and returns empty data.
+// Uses file locking to prevent concurrent access from multiple processes.
 func (s *storage) load() (*addressBookData, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Acquire inter-process file lock
+	lockFile, err := s.acquireFileLock()
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire lock for load: %w", err)
+	}
+	defer s.releaseFileLock(lockFile)
 
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -79,10 +131,18 @@ func (s *storage) load() (*addressBookData, error) {
 }
 
 // save writes the address book to disk atomically.
-// It writes to a temporary file first, then renames to the target path.
+// It writes to a temporary file first, syncs to disk, then renames to the target path.
+// Uses file locking to prevent concurrent access from multiple processes.
 func (s *storage) save(book *addressBookData) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Acquire inter-process file lock
+	lockFile, err := s.acquireFileLock()
+	if err != nil {
+		return fmt.Errorf("failed to acquire lock for save: %w", err)
+	}
+	defer s.releaseFileLock(lockFile)
 
 	// Ensure the directory exists
 	dir := filepath.Dir(s.path)
@@ -100,8 +160,27 @@ func (s *storage) save(book *addressBookData) error {
 
 	// Write to temporary file
 	tempPath := s.path + tempFileSuffix
-	if err := os.WriteFile(tempPath, data, 0600); err != nil {
+	tempFile, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to create temporary file: %w", err)
+	}
+
+	if _, err := tempFile.Write(data); err != nil {
+		tempFile.Close()
+		os.Remove(tempPath)
 		return fmt.Errorf("failed to write temporary file: %w", err)
+	}
+
+	// Sync to disk to ensure durability before rename
+	if err := tempFile.Sync(); err != nil {
+		tempFile.Close()
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to sync temporary file: %w", err)
+	}
+
+	if err := tempFile.Close(); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to close temporary file: %w", err)
 	}
 
 	// Atomic rename

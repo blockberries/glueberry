@@ -1317,3 +1317,82 @@ benchstat baseline.txt current.txt
 5. **Memory allocation tracking**: All benchmarks are run with `-benchmem` to track allocations per operation, which is important for garbage collection pressure in high-throughput scenarios.
 
 ---
+
+## Phase: P3-3 - Address Book Persistence Improvements
+
+**Status**: ✅ Completed
+**Priority**: P2 (Reliability)
+
+### Summary
+
+Implemented file locking for the address book to ensure safe concurrent access from multiple processes. This prevents file corruption when multiple instances of an application use the same address book file.
+
+### Files Modified
+
+- `pkg/addressbook/storage.go`:
+  - Added `lockFileSuffix` constant for lock file naming
+  - Added `lockPath` field to storage struct
+  - Added `acquireFileLock()` method using `syscall.Flock` for exclusive file locking
+  - Added `releaseFileLock()` method for releasing locks
+  - Updated `load()` to acquire file lock before reading
+  - Updated `save()` to acquire file lock before writing
+  - Added `Sync()` call before atomic rename for durability
+
+- `pkg/addressbook/book_test.go`:
+  - Added `TestFileLocking` - Verifies concurrent writes from multiple Book instances
+  - Added `TestFileLocking_LockFileCreated` - Verifies lock file is created
+
+### Key Functionality Implemented
+
+1. **Inter-Process File Locking**:
+   - Uses `syscall.Flock` with `LOCK_EX` for exclusive locks
+   - Lock file created at `{addressbook_path}.lock`
+   - Blocking lock acquisition ensures serialized access
+
+2. **Durability Improvements**:
+   - Added `Sync()` call after writing temp file
+   - Ensures data is flushed to disk before atomic rename
+   - Protects against data loss on system crash
+
+3. **Lock Lifecycle**:
+   - Lock acquired at start of load/save operations
+   - Lock released after operation completes (via defer)
+   - Lock file persists between operations (reused)
+
+### Test Coverage
+
+- `TestFileLocking` - Concurrent writes from two Book instances
+- `TestFileLocking_LockFileCreated` - Lock file existence verification
+- All existing tests pass with new locking
+
+All tests pass with race detection enabled.
+
+### Usage Notes
+
+The file locking is automatic and transparent to users. When multiple processes or Book instances access the same address book file:
+
+1. Operations are serialized via the lock
+2. No data corruption occurs
+3. Each operation sees a consistent view of the data
+
+```go
+// Safe to use from multiple processes
+book1, _ := addressbook.New("/shared/addressbook.json")
+book2, _ := addressbook.New("/shared/addressbook.json")
+
+// Concurrent operations are safe
+go book1.AddPeer(peer1, addrs, nil)
+go book2.AddPeer(peer2, addrs, nil)
+```
+
+### Design Decisions
+
+1. **Separate lock file**: Using a `.lock` file rather than locking the main file allows atomic rename to work correctly and avoids issues with file handle inheritance.
+
+2. **Blocking locks**: Operations block until the lock is acquired. This is appropriate for address book operations which should be quick.
+
+3. **Lock per operation**: Each load/save operation acquires and releases the lock. This provides fine-grained concurrency while ensuring consistency.
+
+4. **Unix-only flock**: Uses `syscall.Flock` which is available on Unix systems. For cross-platform support in the future, could add build tags for Windows.
+
+---

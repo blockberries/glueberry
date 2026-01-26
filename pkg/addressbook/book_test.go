@@ -721,3 +721,91 @@ func TestDirectoryCreation(t *testing.T) {
 		t.Error("file should have been created")
 	}
 }
+
+func TestFileLocking(t *testing.T) {
+	path := tempFile(t)
+	t.Cleanup(func() { os.Remove(path + ".lock") })
+
+	book1, err := New(path)
+	if err != nil {
+		t.Fatalf("New() failed for book1: %v", err)
+	}
+
+	book2, err := New(path)
+	if err != nil {
+		t.Fatalf("New() failed for book2: %v", err)
+	}
+
+	peerID := mustParsePeerID(t, testPeerIDStr)
+	addr := mustParseMultiaddr(t, "/ip4/127.0.0.1/tcp/9000")
+
+	// Both books should be able to write concurrently without corruption
+	var wg sync.WaitGroup
+	numOps := 50
+
+	for i := 0; i < numOps; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			book1.AddPeer(peerID, []multiaddr.Multiaddr{addr}, map[string]string{
+				"writer": "book1",
+				"index":  string(rune('a' + i%26)),
+			})
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			book2.AddPeer(peerID, []multiaddr.Multiaddr{addr}, map[string]string{
+				"writer": "book2",
+				"index":  string(rune('A' + i%26)),
+			})
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify the file is still valid JSON
+	book3, err := New(path)
+	if err != nil {
+		t.Fatalf("New() failed after concurrent writes: %v", err)
+	}
+
+	if book3.Count() != 1 {
+		t.Errorf("expected 1 peer after concurrent writes, got %d", book3.Count())
+	}
+
+	entry, err := book3.GetPeer(peerID)
+	if err != nil {
+		t.Fatalf("GetPeer() failed: %v", err)
+	}
+
+	// One of the writers should have won
+	writer := entry.Metadata["writer"]
+	if writer != "book1" && writer != "book2" {
+		t.Errorf("unexpected writer value: %q", writer)
+	}
+}
+
+func TestFileLocking_LockFileCreated(t *testing.T) {
+	path := tempFile(t)
+	lockPath := path + ".lock"
+	t.Cleanup(func() { os.Remove(lockPath) })
+
+	peerID := mustParsePeerID(t, testPeerIDStr)
+	addr := mustParseMultiaddr(t, "/ip4/127.0.0.1/tcp/9000")
+
+	book, err := New(path)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	// Add a peer which triggers save and lock file creation
+	err = book.AddPeer(peerID, []multiaddr.Multiaddr{addr}, nil)
+	if err != nil {
+		t.Fatalf("AddPeer() failed: %v", err)
+	}
+
+	// Verify lock file was created
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		t.Error("lock file should have been created")
+	}
+}
