@@ -1871,3 +1871,105 @@ fuzz: elapsed: 3s, execs: 543676, new interesting: 96
 5. **No panic tolerance**: All fuzz tests verify that malformed input results in errors, not panics, ensuring robust error handling.
 
 ---
+
+## Phase CP-1: Security Audit Preparation
+
+**Status:** ✅ Completed
+**Priority:** P0 (Critical - Security)
+
+### Summary
+
+Performed comprehensive security audit of the Glueberry codebase covering cryptographic implementation correctness, input validation, and resource exhaustion prevention.
+
+### Files Modified
+
+- `SECURITY_REVIEW.md` - Added CP-1 audit addendum with detailed findings
+
+### CP-1.1: Cryptographic Implementation Review
+
+**Status:** ✅ PASSED
+
+**Verified:**
+- Ed25519 → X25519 key conversion follows RFC 8032
+- HKDF-SHA256 key derivation with domain separation (`"glueberry-v1-stream-key"`)
+- ChaCha20-Poly1305 random nonce generation via `crypto/rand`
+- Low-order point attack defense (all-zeros check)
+- Key material zeroing implemented (`SecureZero`, `Close()`)
+- Constant-time operations delegated to `golang.org/x/crypto`
+
+**Key Files Reviewed:**
+- `pkg/crypto/keys.go` - Key conversion
+- `pkg/crypto/ecdh.go` - ECDH and HKDF
+- `pkg/crypto/cipher.go` - ChaCha20-Poly1305
+- `pkg/crypto/secure.go` - Key zeroing
+- `pkg/crypto/module.go` - Crypto module lifecycle
+
+### CP-1.2: Input Validation Audit
+
+**Status:** ✅ PASSED
+
+**Validated:**
+- Key size validation (32 bytes for symmetric, 64/32 for Ed25519)
+- Nonce size validation (12 bytes)
+- Ciphertext minimum length validation
+- Ed25519 public key curve point validation
+- MaxMessageSize enforcement on send
+- Configuration validation in `Config.Validate()`
+- Address book JSON parsing with corruption handling
+
+**Key Files Reviewed:**
+- `pkg/crypto/*.go` - All crypto input validation
+- `pkg/addressbook/storage.go` - JSON parsing
+- `pkg/streams/handshake.go` - Handshake message handling
+- `config.go` - Configuration validation
+- `node.go` - Message size enforcement
+
+**Observations (Non-Blocking):**
+- MaxMessageSize only enforced on send, not receive
+- Receive-side size validation recommended for future
+
+### CP-1.3: Resource Exhaustion Review
+
+**Status:** ✅ PASSED
+
+**Verified:**
+- Connection limits via libp2p ConnManager (100-400)
+- Message buffer sizes configurable
+- Flow control with high/low watermarks
+- Buffer pooling for GC pressure reduction
+- Handshake timeout enforcement (default 30s)
+- Reconnection backoff with max attempts
+- Blacklist enforcement via ConnectionGater
+
+**Key Files Reviewed:**
+- `config.go` - All resource limit defaults
+- `pkg/protocol/host.go` - Connection manager setup
+- `pkg/protocol/gater.go` - Connection gating
+- `pkg/connection/manager.go` - Timeout enforcement
+- `internal/flow/controller.go` - Flow control
+- `internal/pool/buffer.go` - Buffer pooling
+
+**Observations (Non-Blocking):**
+- No per-stream receive buffer limit
+- Silent message drops when channel full (documented behavior)
+- No stream rate limiting (consider for high-security deployments)
+
+### Security Review Document Updated
+
+Added comprehensive CP-1 audit addendum to `SECURITY_REVIEW.md` including:
+- Detailed validation point tables
+- Resource limit inventory
+- DoS mitigation mechanisms review
+- Observations and recommendations
+
+### Audit Summary
+
+| Category | Status | Critical Issues |
+|----------|--------|-----------------|
+| CP-1.1 Cryptography | ✅ PASS | None |
+| CP-1.2 Input Validation | ✅ PASS | None |
+| CP-1.3 Resource Exhaustion | ✅ PASS | None |
+
+**Overall CP-1 Status:** ✅ READY FOR RELEASE
+
+---

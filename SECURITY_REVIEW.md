@@ -749,6 +749,208 @@ The project demonstrates **security-first design** and the developers have alrea
 
 ---
 
-**Report Generated:** Automated Security Analysis  
-**Confidence Level:** HIGH (Code analysis + cryptographic verification)  
+**Report Generated:** Automated Security Analysis
+**Confidence Level:** HIGH (Code analysis + cryptographic verification)
 **Next Steps:** Formal third-party security audit recommended
+
+---
+
+## ADDENDUM: CP-1 PRERELEASE SECURITY AUDIT (2026-01-26)
+
+This addendum documents the comprehensive security audit performed as part of prerelease preparation (CP-1).
+
+### CP-1.1: Cryptographic Implementation Review - UPDATED
+
+**Status:** ✅ PASSED
+
+**Key Findings (Updated):**
+
+1. **Ed25519 → X25519 Conversion** - CORRECT
+   - `pkg/crypto/keys.go`: Follows RFC 8032 specification
+   - SHA-512 hashing of Ed25519 seed (first 32 bytes)
+   - Proper X25519 clamping applied (lines 70-74)
+   - Uses `filippo.io/edwards25519` for Edwards point validation
+
+2. **HKDF Key Derivation** - CORRECT
+   - `pkg/crypto/ecdh.go`: Uses HKDF-SHA256 (RFC 5869)
+   - Domain separation: `"glueberry-v1-stream-key"` (line 17)
+   - Salt parameter supported for additional separation
+   - Output: 32-byte symmetric key
+
+3. **ChaCha20-Poly1305 Nonce Handling** - CORRECT
+   - `pkg/crypto/cipher.go`: Random 12-byte nonces via `crypto/rand`
+   - Nonce prepended to ciphertext (lines 80-84)
+   - No nonce reuse possible within practical bounds (2^96 collision resistance)
+   - `EncryptWithNonce` documented with WARNING about nonce reuse
+
+4. **Low-Order Point Attack Defense** - IMPLEMENTED
+   - `pkg/crypto/ecdh.go` lines 38-49: Explicit all-zeros check
+   - Rejects malicious public keys that would produce weak shared secrets
+
+5. **Key Material Zeroing** - NOW IMPLEMENTED ✅
+   - `pkg/crypto/secure.go`: `SecureZero()` and `SecureZeroMultiple()` functions
+   - `pkg/crypto/module.go`:
+     - `RemovePeerKey()` (line 122-129): Zeros key before deletion
+     - `ClearPeerKeys()` (line 134-140): Zeros all cached keys
+     - `Close()` (line 186-196): Zeros Ed25519 and X25519 private keys
+   - **Note:** Simple loop zeroing used; compiler optimization is a theoretical concern but acceptable for defense-in-depth
+
+6. **Constant-Time Operations** - DELEGATED TO LIBRARIES
+   - ChaCha20-Poly1305: Uses `golang.org/x/crypto` (constant-time internally)
+   - X25519: Uses `golang.org/x/crypto/curve25519` (constant-time)
+   - No explicit secret comparisons in Glueberry code
+
+**Cryptographic Assumptions Documented:**
+- Application responsible for verifying peer identity (Ed25519 signatures) during handshake
+- Random nonces sufficient for expected message volumes (<2^40 messages per connection)
+- ECDH shared keys provide per-connection confidentiality (no perfect forward secrecy after connection established)
+
+---
+
+### CP-1.2: Input Validation Audit - UPDATED
+
+**Status:** ✅ PASSED WITH OBSERVATIONS
+
+**Validation Points Reviewed:**
+
+| Location | Validation | Status |
+|----------|------------|--------|
+| `cipher.go:38` | Key size = 32 bytes | ✅ Enforced |
+| `cipher.go:72-74` | Nonce size = 12 bytes | ✅ Enforced |
+| `cipher.go:95-98` | Ciphertext min length (nonce + tag) | ✅ Enforced |
+| `keys.go:23-26` | Ed25519 private key = 64 bytes | ✅ Enforced |
+| `keys.go:46-49` | Ed25519 public key = 32 bytes | ✅ Enforced |
+| `keys.go:51-55` | Ed25519 public key valid curve point | ✅ Enforced |
+| `ecdh.go:23-30` | X25519 key sizes = 32 bytes | ✅ Enforced |
+| `module.go:87-90` | Remote X25519 key size validation | ✅ Enforced |
+| `node.go:614-622` | MaxMessageSize enforcement (send) | ✅ Enforced |
+| `config.go:97-147` | Configuration validation | ✅ Comprehensive |
+
+**Network Message Parsing:**
+
+1. **Cramberry Deserialization** - SAFE
+   - Uses `cramberry.MessageIterator` with `Next()` pattern
+   - Returns errors, does not panic
+   - Fuzz tests added (see `fuzz/cramberry_fuzz_test.go`)
+
+2. **Address Book JSON Parsing** - SAFE
+   - `storage.go:112-123`: Handles corrupted files gracefully (backup and reset)
+   - Empty file handling (lines 104-110)
+   - Nil peers map initialization (lines 126-128)
+   - Fuzz tests added (see `fuzz/addressbook_fuzz_test.go`)
+
+3. **Handshake Message Parsing** - DELEGATED TO APP
+   - Glueberry provides `HandshakeStream.Receive(msg any)`
+   - Application defines message types
+   - Cramberry handles deserialization safely
+   - Deadline enforcement prevents indefinite blocking
+
+**Observations:**
+
+1. ⚠️ **MaxMessageSize on Receive** - NOT ENFORCED
+   - Message size limits only checked on SEND (`node.go:615`)
+   - Incoming messages have no size limit at Glueberry level
+   - **Mitigation:** Cramberry's varint parsing has practical limits; libp2p stream limits apply
+   - **Recommendation:** Add configurable receive size limit
+
+2. ⚠️ **JSON Address Book Size** - NO LIMIT
+   - `storage.go:92`: `os.ReadFile(s.path)` reads entire file
+   - Large files could consume memory
+   - **Mitigation:** Address book is local trusted data
+   - **Recommendation:** Add maximum file size check
+
+3. ⚠️ **Handshake Stream Deadline** - STREAM-LEVEL ONLY
+   - `handshake.go:35`: `stream.SetDeadline(deadline)` set
+   - Manual deadline check also performed (lines 59-61, 89-91)
+   - **Status:** Adequate protection
+
+---
+
+### CP-1.3: Resource Exhaustion Review - UPDATED
+
+**Status:** ✅ PASSED
+
+**Resource Limits Implemented:**
+
+| Resource | Limit | Configuration |
+|----------|-------|---------------|
+| Connection count | Low: 100, High: 400 | `host.go:66-69` (libp2p connmgr) |
+| Message size (send) | Default 1MB | `config.go:22`, enforced in `node.go:615` |
+| Message buffer | Default 1000 | `config.go:19`, `EventBufferSize` |
+| Event buffer | Default 100 | `config.go:18` |
+| Flow control high watermark | Default 1000 | `config.go:20` |
+| Flow control low watermark | Default 100 | `config.go:21` |
+| Handshake timeout | Default 30s | `config.go:13` |
+| Reconnect max attempts | Default 10 | `config.go:16` |
+| Reconnect max delay | Default 5min | `config.go:15` |
+| Failed handshake cooldown | Default 1min | `config.go:17` |
+
+**DoS Mitigation Mechanisms:**
+
+1. **Connection Limiting** - ✅ IMPLEMENTED
+   - libp2p connection manager with watermarks
+   - Blacklist enforcement via `ConnectionGater` (`gater.go`)
+   - Connection deduplication (lines 63-79)
+
+2. **Flow Control / Backpressure** - ✅ IMPLEMENTED
+   - `internal/flow/controller.go`: High/low watermark mechanism
+   - Blocks sends when queue full (configurable)
+   - Can be disabled via `DisableBackpressure` config
+
+3. **Buffer Pooling** - ✅ IMPLEMENTED
+   - `internal/pool/buffer.go`: Three-tier pool (small/medium/large)
+   - Reduces GC pressure under load
+   - Very large buffers (>64KB) allocated directly (not pooled)
+
+4. **Handshake Timeout** - ✅ IMPLEMENTED
+   - `manager.go:307-327`: Timer-based enforcement
+   - Disconnects peer and enters cooldown on timeout
+
+5. **Reconnection Backoff** - ✅ IMPLEMENTED
+   - Exponential backoff with configurable base/max
+   - Max attempts limit (default 10)
+   - Cooldown period after failed handshake
+
+**Observations:**
+
+1. ⚠️ **Per-Stream Read Buffer** - NO EXPLICIT LIMIT
+   - `encrypted.go:170-171`: Reads message into `[]byte`
+   - Cramberry handles framing; large messages could allocate memory
+   - **Mitigation:** libp2p stream limits; MaxMessageSize on send side
+   - **Recommendation:** Add receive-side size validation
+
+2. ⚠️ **Channel Drop Behavior** - SILENT
+   - `encrypted.go:206-215`: Messages dropped silently when channel full
+   - No logging or metrics for dropped messages
+   - **Status:** Documented as expected behavior
+   - **Recommendation:** Add optional `MessageDropped` callback
+
+3. ⚠️ **Incoming Stream Rate** - NO RATE LIMITING
+   - Remote peer could open many streams rapidly
+   - **Mitigation:** Connection gater + handshake timeout
+   - **Recommendation:** Consider stream rate limiting for future
+
+---
+
+### CP-1 AUDIT SUMMARY
+
+| Category | Status | Critical Issues | Recommendations |
+|----------|--------|-----------------|-----------------|
+| CP-1.1 Cryptography | ✅ PASS | None | Document nonce collision bounds |
+| CP-1.2 Input Validation | ✅ PASS | None | Add receive-side message size limit |
+| CP-1.3 Resource Exhaustion | ✅ PASS | None | Add stream rate limiting (future) |
+
+**Overall CP-1 Status:** ✅ READY FOR RELEASE
+
+**Key Improvements Since Initial Review:**
+1. ✅ Key material zeroing implemented (`SecureZero`, module cleanup)
+2. ✅ Fuzz testing infrastructure added (20 fuzz test functions)
+3. ✅ Decryption error callback implemented (`SetDecryptionErrorCallback`)
+4. ✅ Flow control with backpressure implemented
+5. ✅ Comprehensive configuration validation
+
+**Remaining Recommendations (Non-Blocking):**
+1. Add receive-side message size validation
+2. Add metrics for dropped messages
+3. Consider stream rate limiting for high-security deployments
+4. Conduct formal third-party security audit for enterprise use
