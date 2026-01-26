@@ -9,6 +9,17 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
+// StatsRecorder is the interface for recording connection statistics.
+// This allows the glueberry package to provide the stats implementation
+// without creating a circular dependency.
+type StatsRecorder interface {
+	RecordConnectionStart()
+	RecordConnectionEnd()
+	RecordFailure()
+	RecordMessageSent(streamName string, size int)
+	RecordMessageReceived(streamName string, size int)
+}
+
 // PeerConnection tracks the connection state and resources for a single peer.
 // It is NOT safe for concurrent use - the Connection Manager serializes access.
 type PeerConnection struct {
@@ -49,6 +60,10 @@ type PeerConnection struct {
 
 	// LastStateChange is when the state last changed.
 	LastStateChange time.Time
+
+	// Stats is the statistics recorder for this peer.
+	// May be nil if stats tracking is disabled.
+	Stats StatsRecorder
 
 	// mu protects concurrent access to this connection.
 	// Note: The Connection Manager should already serialize access,
@@ -201,6 +216,20 @@ func (pc *PeerConnection) CooldownRemaining() time.Duration {
 		return 0
 	}
 	return remaining
+}
+
+// SetStats sets the statistics recorder for this peer.
+func (pc *PeerConnection) SetStats(stats StatsRecorder) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.Stats = stats
+}
+
+// GetStats returns the statistics recorder for this peer.
+func (pc *PeerConnection) GetStats() StatsRecorder {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	return pc.Stats
 }
 
 // Cleanup releases all resources associated with this connection.

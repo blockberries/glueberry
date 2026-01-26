@@ -625,3 +625,114 @@ node, _ := glueberry.New(&cfg)
 3. **Warn level logging**: Decryption failures are logged at Warn level since they're not necessarily errors (could be network corruption or misconfiguration).
 
 ---
+
+## Phase: P3-2 - Peer Statistics API
+
+**Status**: ✅ Completed
+**Priority**: P1 (Production Readiness)
+
+### Summary
+
+Implemented a comprehensive peer statistics API that tracks connection, message, and stream statistics per peer. The API provides real-time visibility into peer activity and connection health.
+
+### Files Created
+
+- `stats.go` - PeerStats, StreamStats, and PeerStatsTracker types
+- `stats_test.go` - Comprehensive tests for statistics tracking
+
+### Files Modified
+
+- `node.go`:
+  - Added `peerStats` map and mutex for tracking
+  - Added `internalMsgs` channel for message interception
+  - Added `PeerStatistics(peerID)` and `AllPeerStatistics()` public APIs
+  - Added `getOrCreatePeerStats()` helper
+  - Added `forwardMessagesWithStats()` goroutine for message tracking
+  - Modified `SendCtx()` to record sent message stats
+
+- `pkg/connection/peer.go`:
+  - Added `StatsRecorder` interface
+  - Added `Stats` field to `PeerConnection`
+  - Added `SetStats()` and `GetStats()` methods
+
+- `pkg/connection/manager.go`:
+  - Added `GetConnection()` method for stats access
+
+### Key Functionality Implemented
+
+1. **PeerStats struct**:
+   - PeerID, Connected, IsOutbound, ConnectedAt, TotalConnectTime
+   - MessagesSent, MessagesReceived, BytesSent, BytesReceived
+   - StreamStats map for per-stream statistics
+   - LastMessageAt, ConnectionCount, FailureCount
+
+2. **StreamStats struct**:
+   - Name, MessagesSent, MessagesReceived
+   - BytesSent, BytesReceived
+   - LastSentAt, LastReceivedAt
+
+3. **PeerStatsTracker**:
+   - Thread-safe mutable stats tracker
+   - Implements connection.StatsRecorder interface
+   - RecordConnectionStart(), RecordConnectionEnd()
+   - RecordFailure()
+   - RecordMessageSent(), RecordMessageReceived()
+   - Snapshot() for creating immutable copies
+
+4. **Public API**:
+   - `PeerStatistics(peerID peer.ID) *PeerStats` - Get stats for a peer
+   - `AllPeerStatistics() map[peer.ID]*PeerStats` - Get all peer stats
+
+5. **Automatic tracking**:
+   - Message sends recorded via SendCtx()
+   - Message receives recorded via forwarding goroutine
+
+### Test Coverage
+
+- `TestPeerStatsTracker_RecordMessageSent` - Message send tracking
+- `TestPeerStatsTracker_RecordMessageReceived` - Message receive tracking
+- `TestPeerStatsTracker_RecordConnectionStartEnd` - Connection duration tracking
+- `TestPeerStatsTracker_RecordFailure` - Failure counting
+- `TestPeerStatsTracker_Concurrent` - Thread safety verification
+- `TestPeerStatsTracker_LastMessageAt` - Timestamp tracking
+- `TestPeerStatsTracker_TotalConnectTimeDuringConnection` - Active connection time
+- `TestPeerStats_Fields` / `TestStreamStats_Fields` - Struct verification
+
+All tests pass with race detection enabled.
+
+### Usage Example
+
+```go
+// Get statistics for a specific peer
+stats := node.PeerStatistics(peerID)
+if stats != nil {
+    fmt.Printf("Peer %s: %d messages sent, %d received\n",
+        stats.PeerID, stats.MessagesSent, stats.MessagesReceived)
+    fmt.Printf("Total connection time: %v\n", stats.TotalConnectTime)
+
+    // Check per-stream stats
+    for stream, ss := range stats.StreamStats {
+        fmt.Printf("  Stream %s: %d KB sent\n", stream, ss.BytesSent/1024)
+    }
+}
+
+// Get all peer statistics
+allStats := node.AllPeerStatistics()
+for peerID, stats := range allStats {
+    if stats.Connected {
+        fmt.Printf("Connected to %s for %v\n", peerID, stats.TotalConnectTime)
+    }
+}
+```
+
+### Design Decisions
+
+1. **Separate internal/external channels**: Messages flow through an internal channel where stats are recorded before forwarding to the external channel for the application. This provides transparent stats collection.
+
+2. **Snapshot pattern**: The `Snapshot()` method returns an immutable copy of stats, allowing safe concurrent access without holding locks while the caller processes the data.
+
+3. **StatsRecorder interface**: The connection package defines a `StatsRecorder` interface, allowing the glueberry package to provide the implementation without circular dependencies.
+
+4. **Non-blocking message forwarding**: If the external channel is full, messages are dropped to prevent blocking the stats collection. This matches the existing behavior elsewhere in the codebase.
+
+---

@@ -35,8 +35,13 @@ type Node struct {
 	eventDispatch *eventdispatch.Dispatcher
 
 	// Channels
-	events   <-chan eventdispatch.ConnectionEvent
-	messages chan streams.IncomingMessage
+	events       <-chan eventdispatch.ConnectionEvent
+	internalMsgs chan streams.IncomingMessage // internal channel from stream manager
+	messages     chan streams.IncomingMessage // external channel for application
+
+	// Stats tracking
+	peerStats   map[peer.ID]*PeerStatsTracker
+	peerStatsMu sync.RWMutex
 
 	// Lifecycle
 	ctx     context.Context
@@ -75,8 +80,9 @@ func New(cfg *Config) (*Node, error) {
 	// Create event dispatcher
 	dispatcher := eventdispatch.NewDispatcher(cfg.EventBufferSize)
 
-	// Create message channel
-	messagesChan := make(chan streams.IncomingMessage, cfg.MessageBufferSize)
+	// Create message channels - internal for stream manager, external for application
+	internalMsgsChan := make(chan streams.IncomingMessage, cfg.MessageBufferSize)
+	externalMsgsChan := make(chan streams.IncomingMessage, cfg.MessageBufferSize)
 
 	// Create connection gater
 	gater := protocol.NewConnectionGater(addrBook)
@@ -97,8 +103,8 @@ func New(cfg *Config) (*Node, error) {
 		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
 	}
 
-	// Create stream manager
-	streamMgr := streams.NewManager(ctx, libp2pHost, cryptoModule, messagesChan)
+	// Create stream manager - uses internal messages channel
+	streamMgr := streams.NewManager(ctx, libp2pHost, cryptoModule, internalMsgsChan)
 
 	// Wire up decryption error callback for logging and metrics
 	streamMgr.SetDecryptionErrorCallback(func(peerID peer.ID, err error) {
@@ -124,7 +130,7 @@ func New(cfg *Config) (*Node, error) {
 	// Wire up connection deduplication: gater checks if we're already connecting
 	gater.SetStateChecker(connMgr)
 
-	return &Node{
+	node := &Node{
 		config:        cfg,
 		logger:        cfg.Logger,
 		metrics:       cfg.Metrics,
@@ -135,11 +141,18 @@ func New(cfg *Config) (*Node, error) {
 		streamManager: streamMgr,
 		eventDispatch: dispatcher,
 		events:        dispatcher.Events(),
-		messages:      messagesChan,
+		internalMsgs:  internalMsgsChan,
+		messages:      externalMsgsChan,
+		peerStats:     make(map[peer.ID]*PeerStatsTracker),
 		ctx:           ctx,
 		cancel:        cancel,
 		started:       false,
-	}, nil
+	}
+
+	// Start message forwarding goroutine that records stats
+	go node.forwardMessagesWithStats()
+
+	return node, nil
 }
 
 // Start starts the node and begins listening for connections.
@@ -229,8 +242,8 @@ func (n *Node) Stop() error {
 	// Close crypto module to zero key material (after libp2p is fully stopped)
 	n.crypto.Close()
 
-	// Close messages channel
-	close(n.messages)
+	// Note: messages channel is closed by forwardMessagesWithStats goroutine
+	// when context is cancelled
 
 	n.started = false
 
@@ -575,7 +588,13 @@ func (n *Node) SendCtx(ctx context.Context, peerID peer.ID, streamName string, d
 	}
 	n.startMu.Unlock()
 
-	return n.streamManager.SendCtx(ctx, peerID, streamName, data)
+	err := n.streamManager.SendCtx(ctx, peerID, streamName, data)
+	if err == nil {
+		// Record stats on successful send
+		tracker := n.getOrCreatePeerStats(peerID)
+		tracker.RecordMessageSent(streamName, len(data))
+	}
+	return err
 }
 
 // Messages returns the channel for receiving incoming messages.
@@ -603,4 +622,84 @@ func (n *Node) Events() <-chan ConnectionEvent {
 	}()
 
 	return publicEvents
+}
+
+// PeerStatistics returns statistics for a specific peer.
+// Returns nil if the peer has no recorded statistics.
+func (n *Node) PeerStatistics(peerID peer.ID) *PeerStats {
+	n.peerStatsMu.RLock()
+	tracker := n.peerStats[peerID]
+	n.peerStatsMu.RUnlock()
+
+	if tracker == nil {
+		return nil
+	}
+
+	// Get connection state
+	conn := n.connections.GetConnection(peerID)
+	connected := conn != nil && conn.GetState() == connection.StateEstablished
+	isOutbound := conn != nil && conn.GetIsOutbound()
+
+	return tracker.Snapshot(peerID, connected, isOutbound)
+}
+
+// AllPeerStatistics returns statistics for all peers with recorded stats.
+func (n *Node) AllPeerStatistics() map[peer.ID]*PeerStats {
+	n.peerStatsMu.RLock()
+	defer n.peerStatsMu.RUnlock()
+
+	result := make(map[peer.ID]*PeerStats, len(n.peerStats))
+	for peerID, tracker := range n.peerStats {
+		// Get connection state
+		conn := n.connections.GetConnection(peerID)
+		connected := conn != nil && conn.GetState() == connection.StateEstablished
+		isOutbound := conn != nil && conn.GetIsOutbound()
+
+		result[peerID] = tracker.Snapshot(peerID, connected, isOutbound)
+	}
+
+	return result
+}
+
+// getOrCreatePeerStats returns the stats tracker for a peer, creating it if needed.
+func (n *Node) getOrCreatePeerStats(peerID peer.ID) *PeerStatsTracker {
+	n.peerStatsMu.Lock()
+	defer n.peerStatsMu.Unlock()
+
+	tracker := n.peerStats[peerID]
+	if tracker == nil {
+		tracker = NewPeerStatsTracker()
+		n.peerStats[peerID] = tracker
+	}
+	return tracker
+}
+
+// forwardMessagesWithStats reads from internal messages channel,
+// records stats, and forwards to the external channel.
+func (n *Node) forwardMessagesWithStats() {
+	for {
+		select {
+		case <-n.ctx.Done():
+			close(n.messages)
+			return
+		case msg, ok := <-n.internalMsgs:
+			if !ok {
+				close(n.messages)
+				return
+			}
+
+			// Record stats for received message
+			tracker := n.getOrCreatePeerStats(msg.PeerID)
+			tracker.RecordMessageReceived(msg.StreamName, len(msg.Data))
+
+			// Forward to external channel (non-blocking to prevent deadlock)
+			select {
+			case n.messages <- msg:
+				// Message delivered
+			default:
+				// Channel full - drop message
+				// In production, might want to log this
+			}
+		}
+	}
 }

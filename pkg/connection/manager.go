@@ -650,6 +650,13 @@ func (m *Manager) MarkEstablished(peerID peer.ID) error {
 }
 
 // GetOrCreateConnection gets an existing connection or creates a new one for incoming connections.
+// GetConnection returns the connection for a peer, or nil if not found.
+func (m *Manager) GetConnection(peerID peer.ID) *PeerConnection {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.connections[peerID]
+}
+
 func (m *Manager) GetOrCreateConnection(peerID peer.ID) *PeerConnection {
 	m.mu.Lock()
 	defer m.mu.Unlock()
