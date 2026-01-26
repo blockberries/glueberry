@@ -2,29 +2,50 @@
 
 **Glueberry** is a Go library for secure P2P communications built on [libp2p](https://libp2p.io/). It provides encrypted, multiplexed streams between peers with application-controlled handshaking and automatic reconnection.
 
+**Version:** 1.0.1 | **Protocol Version:** 1.0.0
+
 ## Features
 
-- End-to-End Encryption - ChaCha20-Poly1305 authenticated encryption with X25519 ECDH key exchange
-- Symmetric Event-Driven API - Same code handles both initiator and responder
-- App-Controlled Handshaking - Flexible handshake protocol defined by your application
-- Automatic Reconnection - Exponential backoff with jitter and configurable retry limits
-- Stream Multiplexing - Multiple named encrypted streams per peer connection
-- Bidirectional - Both peers can initiate connections and streams
-- Blacklist Support - Peer blacklisting with connection-level enforcement
-- Event System - Non-blocking connection state change notifications
-- Thread-Safe - All public APIs safe for concurrent use
-- NAT Traversal - Built-in hole punching via libp2p
-- Persistent Address Book - JSON-based peer storage
+### Core
+- **End-to-End Encryption** - ChaCha20-Poly1305 authenticated encryption with X25519 ECDH key exchange
+- **Symmetric Event-Driven API** - Same code handles both initiator and responder
+- **App-Controlled Handshaking** - Flexible handshake protocol defined by your application
+- **Two-Phase Handshake** - Race-condition-free stream establishment with `PrepareStreams` + `FinalizeHandshake`
+- **Automatic Reconnection** - Exponential backoff with jitter and configurable retry limits
+- **Stream Multiplexing** - Multiple named encrypted streams per peer connection
+- **Lazy Stream Opening** - Streams created on first use, not during handshake
+
+### Operations
+- **Context Support** - `ConnectCtx`, `SendCtx`, `DisconnectCtx` for cancellation and timeouts
+- **Flow Control** - High/low watermark backpressure to prevent memory exhaustion
+- **Event Filtering** - Subscribe to events for specific peers or states
+- **Peer Statistics** - Per-peer message counts, bytes, latency tracking
+
+### Observability
+- **Logger Interface** - Pluggable structured logging (slog, zap, zerolog compatible)
+- **Metrics Interface** - Prometheus-compatible metrics collection
+- **Debug Utilities** - State dumping, connection summaries, peer info
+
+### Security
+- **Key Material Protection** - Automatic zeroing of sensitive data
+- **Decryption Callbacks** - Observability for tampering detection
+- **Input Validation** - Message size limits, Cramberry SecureOptions
+- **Blacklist Support** - Multi-layer connection enforcement
+
+### Testing
+- **MockNode** - For application testing without network
+- **Fuzz Tests** - Security-critical parsing
+- **Stress Tests** - Concurrent operation verification
 
 ## Installation
 
 ```bash
-go get github.com/blockberries/glueberry
+go get github.com/blockberries/glueberry@v1.0.1
 ```
 
 **Requirements:**
-- Go 1.25.6 or later
-- [Cramberry](https://github.com/blockberries/cramberry) for message serialization
+- Go 1.21 or later
+- [Cramberry](https://github.com/blockberries/cramberry) v1.2.0+ for message serialization
 
 ## Quick Start
 
@@ -251,14 +272,26 @@ type Config struct {
     AddressBookPath string                // Path to address book JSON file
     ListenAddrs     []multiaddr.Multiaddr // Addresses to listen on
 
-    // Optional (with defaults)
+    // Timeouts & Reconnection
     HandshakeTimeout        time.Duration // Default: 30s
     ReconnectBaseDelay      time.Duration // Default: 1s
     ReconnectMaxDelay       time.Duration // Default: 5m
     ReconnectMaxAttempts    int           // Default: 10 (0 = unlimited)
     FailedHandshakeCooldown time.Duration // Default: 1m
+
+    // Buffers
     EventBufferSize         int           // Default: 100
     MessageBufferSize       int           // Default: 1000
+
+    // Flow Control
+    HighWatermark      int  // Default: 1000 - Block sends above this
+    LowWatermark       int  // Default: 100 - Unblock when pending drops to this
+    MaxMessageSize     int  // Default: 1MB - Maximum message size
+    DisableBackpressure bool // Default: false
+
+    // Observability
+    Logger  Logger   // Default: NopLogger
+    Metrics Metrics  // Default: NopMetrics
 }
 ```
 
@@ -271,6 +304,13 @@ cfg := glueberry.NewConfig(
     glueberry.WithHandshakeTimeout(60*time.Second),
     glueberry.WithReconnectMaxAttempts(5),
     glueberry.WithMessageBufferSize(5000),
+    glueberry.WithHighWatermark(500),
+    glueberry.WithMaxMessageSize(512*1024),
+    glueberry.WithLogger(myLogger),
+    glueberry.WithMetrics(myMetrics),
+    glueberry.WithDecryptionErrorCallback(func(peerID peer.ID, err error) {
+        log.Warn("possible tampering", "peer", peerID)
+    }),
 )
 ```
 
@@ -417,6 +457,7 @@ All post-handshake communication is encrypted. Keys are never logged. Input vali
 | `New` | `New(cfg *Config) (*Node, error)` | Create a new node (not started) |
 | `Start` | `Start() error` | Start listening and auto-connect to peers |
 | `Stop` | `Stop() error` | Graceful shutdown and cleanup |
+| `Version` | `Version() ProtocolVersion` | Get protocol version |
 
 **Information:**
 | Method | Signature | Description |
@@ -432,32 +473,58 @@ All post-handshake communication is encrypted. Keys are never logged. Input vali
 | `RemovePeer` | `RemovePeer(peerID) error` | Remove peer from address book |
 | `GetPeer` | `GetPeer(peerID) (*PeerEntry, error)` | Retrieve peer information |
 | `ListPeers` | `ListPeers() []*PeerEntry` | List all non-blacklisted peers |
-| `PeerAddrs` | `PeerAddrs(peerID) []multiaddr.Multiaddr` | Get addresses from peerstore (useful for incoming connections) |
-| `BlacklistPeer` | `BlacklistPeer(peerID) error` | Blacklist peer and disconnect if connected |
-| `UnblacklistPeer` | `UnblacklistPeer(peerID) error` | Remove peer from blacklist |
+| `PeerAddrs` | `PeerAddrs(peerID) []multiaddr.Multiaddr` | Get addresses from peerstore |
+| `BlacklistPeer` | `BlacklistPeer(peerID) error` | Blacklist peer and disconnect |
+| `UnblacklistPeer` | `UnblacklistPeer(peerID) error` | Remove from blacklist |
 
-**Connections:**
+**Connections (with context support):**
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `Connect` | `Connect(peerID) error` | Explicitly connect to a peer |
+| `Connect` | `Connect(peerID) error` | Connect to a peer |
+| `ConnectCtx` | `ConnectCtx(ctx, peerID) error` | Connect with context (cancellation/timeout) |
 | `Disconnect` | `Disconnect(peerID) error` | Close connection to peer |
-| `ConnectionState` | `ConnectionState(peerID) ConnectionState` | Query current connection state |
-| `CancelReconnection` | `CancelReconnection(peerID) error` | Stop ongoing reconnection attempts |
+| `DisconnectCtx` | `DisconnectCtx(ctx, peerID) error` | Disconnect with context |
+| `ConnectionState` | `ConnectionState(peerID) ConnectionState` | Query connection state |
+| `CancelReconnection` | `CancelReconnection(peerID) error` | Stop reconnection attempts |
+| `IsOutbound` | `IsOutbound(peerID) (bool, error)` | Check if we initiated the connection |
 
 **Handshake (Two-Phase API):**
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `PrepareStreams` | `PrepareStreams(peerID, pubKey, streamNames) error` | Derive shared key, register handlers. Call when receiving peer's PubKey. |
-| `FinalizeHandshake` | `FinalizeHandshake(peerID) error` | Cancel timeout, close handshake stream, transition to Established. Call when receiving Complete. |
-| `CompleteHandshake` | `CompleteHandshake(peerID, pubKey, streamNames) error` | Convenience method: PrepareStreams + FinalizeHandshake in one call. |
-| `EstablishEncryptedStreams` | `EstablishEncryptedStreams(peerID, pubKey, streamNames) error` | Legacy method (deprecated, use two-phase API). |
+| `PrepareStreams` | `PrepareStreams(peerID, pubKey, streamNames) error` | Derive shared key, register handlers |
+| `FinalizeHandshake` | `FinalizeHandshake(peerID) error` | Complete handshake, transition to Established |
+| `CompleteHandshake` | `CompleteHandshake(peerID, pubKey, streamNames) error` | Convenience: PrepareStreams + FinalizeHandshake |
 
-**Messaging:**
+**Messaging (with context support):**
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `Send` | `Send(peerID, streamName, data) error` | Send data on a stream (handshake or encrypted) |
-| `Messages` | `Messages() <-chan IncomingMessage` | Receive channel for incoming messages |
-| `Events` | `Events() <-chan ConnectionEvent` | Receive channel for connection state events |
+| `Send` | `Send(peerID, streamName, data) error` | Send data on a stream |
+| `SendCtx` | `SendCtx(ctx, peerID, streamName, data) error` | Send with context (respects backpressure) |
+| `Messages` | `Messages() <-chan IncomingMessage` | Receive channel for messages |
+
+**Events (with filtering):**
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Events` | `Events() <-chan ConnectionEvent` | All connection events |
+| `FilteredEvents` | `FilteredEvents(filter) <-chan ConnectionEvent` | Events matching filter |
+| `EventsForPeer` | `EventsForPeer(peerID) <-chan ConnectionEvent` | Events for specific peer |
+| `EventsForStates` | `EventsForStates(states...) <-chan ConnectionEvent` | Events for specific states |
+
+**Statistics:**
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `PeerStatistics` | `PeerStatistics(peerID) *PeerStats` | Get stats for a peer |
+| `AllPeerStatistics` | `AllPeerStatistics() map[peer.ID]*PeerStats` | Get all peer stats |
+
+**Debug:**
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `DumpState` | `DumpState() *DebugState` | Get complete node state |
+| `DumpStateJSON` | `DumpStateJSON() (string, error)` | State as formatted JSON |
+| `DumpStateString` | `DumpStateString() string` | Human-readable summary |
+| `ConnectionSummary` | `ConnectionSummary() map[ConnectionState]int` | Counts by state |
+| `ListKnownPeers` | `ListKnownPeers() []peer.ID` | List all known peers |
+| `PeerInfo` | `PeerInfo(peerID) (*DebugPeerInfo, error)` | Detailed peer info |
 
 ## Connection States
 
@@ -514,34 +581,92 @@ if err := node.Connect(peerID); err != nil {
 }
 ```
 
+## Observability
+
+### Logger Interface
+
+Glueberry accepts a pluggable logger interface compatible with slog, zap, and zerolog:
+
+```go
+type Logger interface {
+    Debug(msg string, keysAndValues ...any)
+    Info(msg string, keysAndValues ...any)
+    Warn(msg string, keysAndValues ...any)
+    Error(msg string, keysAndValues ...any)
+}
+
+// Use with slog
+cfg := glueberry.NewConfig(
+    privateKey, addressBookPath, listenAddrs,
+    glueberry.WithLogger(slog.Default()),
+)
+```
+
+### Metrics Interface
+
+Prometheus-compatible metrics collection:
+
+```go
+type Metrics interface {
+    ConnectionOpened(direction string)
+    ConnectionClosed(direction string)
+    HandshakeDuration(seconds float64)
+    MessageSent(stream string, bytes int)
+    MessageReceived(stream string, bytes int)
+    EncryptionError()
+    DecryptionError()
+    EventDropped()
+    BackpressureEngaged(stream string)
+    // ... more methods
+}
+
+// Implement for Prometheus
+type PrometheusMetrics struct {
+    connectionsTotal *prometheus.CounterVec
+    // ...
+}
+```
+
 ## Security Considerations
 
 **Key Security:**
 - Private keys never logged or exposed in error messages
 - Shared secrets derived via ECDH, stored only in crypto module
 - Keys deep-copied when accessed to prevent external modification
+- Automatic key material zeroing after use
 
 **Message Security:**
 - ChaCha20-Poly1305 AEAD provides authenticated encryption
 - Poly1305 MAC prevents message tampering
 - Random 96-bit nonces ensure uniqueness (~2^48 messages before collision risk)
+- Configurable maximum message size (default 1MB)
 
 **Network Security:**
 - Handshake timeout prevents resource exhaustion attacks
 - Blacklisting enforced at multiple layers (gater, manager, protocol handlers)
 - All network data treated as untrusted and validated
 - Low-order point attack protection in ECDH
+- Decryption error callback for tampering detection
 
 **Thread Safety:**
 - All public `Node` methods are thread-safe
 - Internal components use appropriate synchronization (RWMutex, channels)
 - Event and message channels safe for concurrent reads (single consumer recommended)
+- Verified with race detector and stress tests
 
 ## Testing
 
+### Running Tests
+
 ```bash
-# Run all tests
+# Run all unit tests
 make test
+
+# Run with race detector
+make test-race
+
+# Run integration tests
+make test-integration
 
 # Run tests with coverage
 make coverage
@@ -553,11 +678,49 @@ make lint
 make build
 ```
 
+### Fuzz Testing
+
+Security-critical parsers have fuzz tests:
+
+```bash
+# Fuzz the cipher
+go test -fuzz=FuzzDecrypt -fuzztime=30s ./fuzz/
+
+# Fuzz message parsing
+go test -fuzz=FuzzMessageIterator -fuzztime=30s ./fuzz/
+```
+
+### MockNode for Application Testing
+
+A MockNode is provided for testing applications without network:
+
+```go
+import "github.com/blockberries/glueberry/pkg/testing"
+
+func TestMyApp(t *testing.T) {
+    mock := testing.NewMockNode()
+
+    // Simulate events
+    mock.EmitEvent(glueberry.ConnectionEvent{
+        PeerID: peerID,
+        State:  glueberry.StateConnected,
+    })
+
+    // Simulate messages
+    mock.SimulateMessage(peerID, "stream", []byte("hello"))
+
+    // Verify sends
+    sent := mock.SentMessages()
+    assert.Len(t, sent, 1)
+}
+```
+
 ## Documentation
 
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Detailed architecture and design
-- **[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)** - Implementation roadmap
-- **[PROGRESS_REPORT.md](PROGRESS_REPORT.md)** - Development progress and status
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Detailed architecture, component design, and API reference
+- **[SECURITY_REVIEW.md](SECURITY_REVIEW.md)** - Security audit findings and cryptographic analysis
+- **[PRERELEASE_IMPLEMENTATION_PLAN.md](PRERELEASE_IMPLEMENTATION_PLAN.md)** - Implementation roadmap
+- **[PRERELEASE_PROGRESS_REPORT.md](PRERELEASE_PROGRESS_REPORT.md)** - Development progress and status
 
 ## License
 

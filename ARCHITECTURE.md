@@ -4,6 +4,9 @@
 
 Glueberry is a Go library providing encrypted P2P communications over libp2p. It handles connection management, key exchange, and encrypted stream multiplexing while delegating peer discovery and handshake logic to the consuming application.
 
+**Version:** 1.0.1
+**Protocol Version:** 1.0.0
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Application                               │
@@ -14,8 +17,12 @@ Glueberry is a Go library providing encrypted P2P communications over libp2p. It
 │  │  Manager    │  │   Manager   │  │  (Encrypted Streams)    │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │   Crypto    │  │  Handshake  │  │    Event Dispatcher     │  │
-│  │   Module    │  │   Handler   │  │                         │  │
+│  │   Crypto    │  │  Flow       │  │    Event Dispatcher     │  │
+│  │   Module    │  │  Controller │  │  (with Filtering)       │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │   Logger    │  │  Metrics    │  │   Peer Statistics       │  │
+│  │  Interface  │  │  Interface  │  │   Tracker               │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 ├─────────────────────────────────────────────────────────────────┤
 │                         libp2p                                   │
@@ -311,6 +318,219 @@ type ConnectionEvent struct {
 - `StateReconnecting` - Reconnection attempt starting
 - `StateCooldown` - Entered cooldown after failed handshake
 
+**Event Filtering:**
+
+Applications can subscribe to filtered events for specific peers or states:
+
+```go
+// All events
+allEvents := node.Events()
+
+// Events for a specific peer
+peerEvents := node.EventsForPeer(peerID)
+
+// Events for specific states
+connectEvents := node.EventsForStates(StateConnected, StateEstablished)
+
+// Custom filter
+filter := EventFilter{
+    PeerIDs: []peer.ID{peer1, peer2},
+    States:  []ConnectionState{StateEstablished},
+}
+filtered := node.FilteredEvents(filter)
+```
+
+### 8. Observability (Logger & Metrics)
+
+Glueberry provides pluggable interfaces for logging and metrics collection.
+
+**Logger Interface:**
+
+```go
+type Logger interface {
+    Debug(msg string, keysAndValues ...any)
+    Info(msg string, keysAndValues ...any)
+    Warn(msg string, keysAndValues ...any)
+    Error(msg string, keysAndValues ...any)
+}
+```
+
+Compatible with slog, zap, zerolog. NopLogger provided for when logging is disabled.
+
+**Strategic Log Points:**
+| Component | Level | Event | Fields |
+|-----------|-------|-------|--------|
+| Node | Info | Started/Stopped | peer_id, listen_addrs |
+| Connection | Info | Connected | peer_id, addr |
+| Connection | Info | Disconnected | peer_id, reason |
+| Connection | Debug | Handshake started | peer_id |
+| Connection | Warn | Handshake failed | peer_id, error |
+| Crypto | Warn | Decryption failed | peer_id, error |
+| AddressBook | Warn | Peer blacklisted | peer_id |
+
+**Metrics Interface:**
+
+```go
+type Metrics interface {
+    // Connection metrics
+    ConnectionOpened(direction string)
+    ConnectionClosed(direction string)
+    ConnectionAttempt(result string)
+    HandshakeDuration(seconds float64)
+    HandshakeResult(result string)
+
+    // Stream metrics
+    MessageSent(stream string, bytes int)
+    MessageReceived(stream string, bytes int)
+    StreamOpened(stream string)
+    StreamClosed(stream string)
+
+    // Crypto metrics
+    EncryptionError()
+    DecryptionError()
+    KeyDerivation(cached bool)
+
+    // Event metrics
+    EventEmitted(state string)
+    EventDropped()
+    MessageDropped()
+
+    // Flow control metrics
+    BackpressureEngaged(stream string)
+    BackpressureWait(stream string, seconds float64)
+    PendingMessages(stream string, count int)
+}
+```
+
+NopMetrics provided for when metrics are disabled.
+
+### 9. Flow Controller
+
+Per-stream flow control with backpressure to prevent overwhelming peers or buffers.
+
+```go
+type FlowController struct {
+    highWatermark int  // Block sends above this threshold (default: 1000)
+    lowWatermark  int  // Unblock when pending drops to this (default: 100)
+    pending       int  // Current pending message count
+}
+```
+
+**Behavior:**
+1. Before each Send(), Acquire() is called
+2. If pending >= highWatermark, sender blocks (context-aware)
+3. After message is processed, Release() is called
+4. When pending <= lowWatermark, blocked senders unblock
+
+**Configuration:**
+```go
+cfg := glueberry.NewConfig(
+    privateKey, addressBookPath, listenAddrs,
+    glueberry.WithHighWatermark(500),
+    glueberry.WithLowWatermark(50),
+    glueberry.WithMaxMessageSize(512*1024),  // 512KB max
+    // glueberry.WithBackpressureDisabled(), // Disable if needed
+)
+```
+
+### 10. Peer Statistics Tracker
+
+Comprehensive per-peer statistics for monitoring connection health and throughput.
+
+```go
+type PeerStats struct {
+    PeerID           peer.ID
+    Connected        bool
+    IsOutbound       bool
+    ConnectedAt      time.Time
+    TotalConnectTime time.Duration
+
+    // Message stats
+    MessagesSent     int64
+    MessagesReceived int64
+    BytesSent        int64
+    BytesReceived    int64
+
+    // Per-stream stats
+    StreamStats      map[string]*StreamStats
+
+    // Health
+    LastMessageAt    time.Time
+    ConnectionCount  int  // Total connections including reconnects
+    FailureCount     int
+}
+
+type StreamStats struct {
+    Name             string
+    MessagesSent     int64
+    MessagesReceived int64
+    BytesSent        int64
+    BytesReceived    int64
+    LastSentAt       time.Time
+    LastReceivedAt   time.Time
+}
+```
+
+**Usage:**
+```go
+// Get stats for a specific peer
+stats := node.PeerStatistics(peerID)
+
+// Get all peer stats
+allStats := node.AllPeerStatistics()
+```
+
+### 11. Protocol Versioning
+
+Semantic versioning for protocol compatibility checking.
+
+```go
+type ProtocolVersion struct {
+    Major uint8  // Breaking changes (must match)
+    Minor uint8  // New features (peer's cannot exceed ours)
+    Patch uint8  // Bug fixes (always compatible)
+}
+```
+
+**Compatibility Rules:**
+- Major versions must match
+- Peer's minor version must not exceed ours
+- Patch versions are always compatible
+
+```go
+version := node.Version()
+fmt.Printf("Protocol version: %s\n", version.String())  // "1.0.0"
+
+// In handshake, check compatibility
+if !myVersion.Compatible(peerVersion) {
+    return ErrVersionMismatch
+}
+```
+
+### 12. Debug Utilities
+
+Tools for troubleshooting and diagnostics.
+
+```go
+// Get complete node state as struct
+state := node.DumpState()
+
+// Get state as formatted JSON
+jsonStr, _ := node.DumpStateJSON()
+
+// Get human-readable summary
+fmt.Println(node.DumpStateString())
+
+// Connection summary
+summary := node.ConnectionSummary()
+
+// List known peers
+peerIDs := node.ListKnownPeers()
+
+// Get detailed peer info
+info, _ := node.PeerInfo(peerID)
+```
+
 ## Public API
 
 ### Configuration
@@ -332,7 +552,31 @@ type Config struct {
     // Channel buffer sizes
     EventBufferSize   int  // Default: 100
     MessageBufferSize int  // Default: 1000
+
+    // Flow Control
+    HighWatermark      int  // Default: 1000 - Block sends above this
+    LowWatermark       int  // Default: 100 - Unblock when pending drops to this
+    MaxMessageSize     int  // Default: 1MB - Maximum message size
+    DisableBackpressure bool // Default: false
+
+    // Observability
+    Logger  Logger   // Default: NopLogger
+    Metrics Metrics  // Default: NopMetrics
 }
+```
+
+**Functional Options:**
+```go
+cfg := glueberry.NewConfig(
+    privateKey, addressBookPath, listenAddrs,
+    glueberry.WithHandshakeTimeout(60*time.Second),
+    glueberry.WithReconnectMaxAttempts(5),
+    glueberry.WithHighWatermark(500),
+    glueberry.WithLowWatermark(50),
+    glueberry.WithMaxMessageSize(512*1024),
+    glueberry.WithLogger(myLogger),
+    glueberry.WithMetrics(myMetrics),
+)
 ```
 
 ### Node Methods
@@ -344,6 +588,8 @@ func (n *Node) Start() error
 func (n *Node) Stop() error
 func (n *Node) PeerID() peer.ID
 func (n *Node) PublicKey() ed25519.PublicKey
+func (n *Node) Addrs() []multiaddr.Multiaddr
+func (n *Node) Version() ProtocolVersion
 
 // Address Book
 func (n *Node) AddPeer(peerID peer.ID, addrs []multiaddr.Multiaddr, metadata map[string]string) error
@@ -352,22 +598,44 @@ func (n *Node) BlacklistPeer(peerID peer.ID) error
 func (n *Node) UnblacklistPeer(peerID peer.ID) error
 func (n *Node) GetPeer(peerID peer.ID) (*PeerInfo, error)
 func (n *Node) ListPeers() []PeerInfo
+func (n *Node) PeerAddrs(peerID peer.ID) []multiaddr.Multiaddr
 
-// Connection
+// Connection (with context support)
 func (n *Node) Connect(peerID peer.ID) error
+func (n *Node) ConnectCtx(ctx context.Context, peerID peer.ID) error
 func (n *Node) Disconnect(peerID peer.ID) error
+func (n *Node) DisconnectCtx(ctx context.Context, peerID peer.ID) error
 func (n *Node) CancelReconnection(peerID peer.ID) error
 func (n *Node) ConnectionState(peerID peer.ID) ConnectionState
+func (n *Node) IsOutbound(peerID peer.ID) (bool, error)
 
 // Handshake Completion (two-phase for race-free establishment)
-func (n *Node) PrepareStreams(peerID peer.ID, peerPubKey ed25519.PublicKey, streamNames []string) error  // Call on receiving PubKey
-func (n *Node) FinalizeHandshake(peerID peer.ID) error                                                   // Call on receiving Complete
-func (n *Node) CompleteHandshake(peerID peer.ID, peerPubKey ed25519.PublicKey, streamNames []string) error // Convenience: PrepareStreams + FinalizeHandshake
+func (n *Node) PrepareStreams(peerID peer.ID, peerPubKey ed25519.PublicKey, streamNames []string) error
+func (n *Node) FinalizeHandshake(peerID peer.ID) error
+func (n *Node) CompleteHandshake(peerID peer.ID, peerPubKey ed25519.PublicKey, streamNames []string) error
 
-// Messaging
+// Messaging (with context support)
 func (n *Node) Send(peerID peer.ID, streamName string, data []byte) error
+func (n *Node) SendCtx(ctx context.Context, peerID peer.ID, streamName string, data []byte) error
 func (n *Node) Messages() <-chan IncomingMessage
+
+// Events (with filtering)
 func (n *Node) Events() <-chan ConnectionEvent
+func (n *Node) FilteredEvents(filter EventFilter) <-chan ConnectionEvent
+func (n *Node) EventsForPeer(peerID peer.ID) <-chan ConnectionEvent
+func (n *Node) EventsForStates(states ...ConnectionState) <-chan ConnectionEvent
+
+// Statistics
+func (n *Node) PeerStatistics(peerID peer.ID) *PeerStats
+func (n *Node) AllPeerStatistics() map[peer.ID]*PeerStats
+
+// Debug
+func (n *Node) DumpState() *DebugState
+func (n *Node) DumpStateJSON() (string, error)
+func (n *Node) DumpStateString() string
+func (n *Node) ConnectionSummary() map[ConnectionState]int
+func (n *Node) ListKnownPeers() []peer.ID
+func (n *Node) PeerInfo(peerID peer.ID) (*DebugPeerInfo, error)
 ```
 
 ## Protocol IDs
@@ -560,7 +828,9 @@ For encrypted streams, the Cramberry payload contains:
 
 ## Error Handling
 
-Errors are returned directly from methods. Common error types:
+Glueberry provides both sentinel errors for simple cases and rich error types for programmatic handling.
+
+### Sentinel Errors
 
 ```go
 var (
@@ -573,5 +843,232 @@ var (
     ErrEncryptionFailed   = errors.New("encryption failed")
     ErrDecryptionFailed   = errors.New("decryption failed")
     ErrInvalidPublicKey   = errors.New("invalid public key")
+    ErrVersionMismatch    = errors.New("protocol version mismatch")
+    ErrMessageTooLarge    = errors.New("message exceeds max size")
+    ErrBackpressureTimeout = errors.New("backpressure timeout")
 )
 ```
+
+### Rich Error Types
+
+For programmatic error handling, Glueberry provides rich error types with error codes:
+
+```go
+type ErrorCode int
+
+const (
+    ErrCodeUnknown ErrorCode = iota
+    ErrCodeConnectionFailed
+    ErrCodeHandshakeFailed
+    ErrCodeHandshakeTimeout
+    ErrCodeStreamClosed
+    ErrCodeEncryptionFailed
+    ErrCodeDecryptionFailed
+    ErrCodePeerNotFound
+    ErrCodePeerBlacklisted
+    ErrCodeBufferFull
+    ErrCodeContextCanceled
+    ErrCodeInvalidConfig
+    ErrCodeNodeNotStarted
+    ErrCodeNodeAlreadyStarted
+    ErrCodeVersionMismatch
+    ErrCodeMessageTooLarge
+    ErrCodeBackpressure
+)
+
+type Error struct {
+    Code      ErrorCode
+    Message   string
+    PeerID    peer.ID  // Optional: relevant peer
+    Stream    string   // Optional: relevant stream
+    Cause     error    // Optional: underlying error
+    Retriable bool     // Whether operation can be retried
+}
+```
+
+**Helper Functions:**
+```go
+// Check if error can be retried
+if IsRetriable(err) {
+    // Retry the operation
+}
+
+// Check if error is permanent
+if IsPermanent(err) {
+    // Don't retry, remove peer
+}
+
+// Extract error details
+var gErr *Error
+if errors.As(err, &gErr) {
+    log.Printf("Error %s on peer %s: %s", gErr.Code, gErr.PeerID, gErr.Message)
+}
+
+// Check specific error codes
+if errors.Is(err, &Error{Code: ErrCodeConnectionFailed}) {
+    // Handle connection failure
+}
+```
+
+## Security Hardening
+
+### Key Material Protection
+
+1. **Key Zeroing**: All sensitive key material is zeroed after use using `crypto.ZeroBytes()`:
+   ```go
+   defer crypto.ZeroBytes(sharedSecret)
+   ```
+
+2. **Deep Copy on Access**: Keys are deep-copied when accessed to prevent external modification:
+   ```go
+   key := node.GetSharedKey(peerID)  // Returns a copy
+   ```
+
+3. **No Logging of Secrets**: Private keys, shared secrets, and decrypted messages are never logged, even at debug level.
+
+### Decryption Error Callback
+
+For security observability, applications can register a callback for decryption failures:
+
+```go
+cfg := glueberry.NewConfig(
+    privateKey, addressBookPath, listenAddrs,
+    glueberry.WithDecryptionErrorCallback(func(peerID peer.ID, err error) {
+        log.Warn("Decryption failed",
+            "peer", peerID,
+            "error", err)
+        // Could trigger rate limiting, ban, or alert
+    }),
+)
+```
+
+### ECDH Security
+
+1. **Low-Order Point Check**: X25519 shared secret is validated to prevent small subgroup attacks:
+   ```go
+   // Rejects all-zero shared secrets (indicates invalid peer key)
+   if subtle.ConstantTimeCompare(shared, allZeros) == 1 {
+       return nil, ErrInvalidPublicKey
+   }
+   ```
+
+2. **Key Derivation**: HKDF-SHA256 with context binding ensures domain separation.
+
+### Input Validation
+
+1. **Message Size Limits**: Configurable maximum message size (default 1MB)
+2. **Cramberry SecureOptions**: Conservative deserialization limits
+3. **Stream Name Validation**: Only alphanumeric and hyphen characters allowed
+
+## Testing
+
+### Unit Tests
+
+Comprehensive test coverage with race detection:
+```bash
+make test        # Run all unit tests
+make test-race   # Run with race detector
+make coverage    # Generate coverage report
+```
+
+### Fuzz Testing
+
+Fuzz tests for security-critical parsing:
+- `fuzz/crypto_fuzz_test.go` - Cipher operations, key conversion
+- `fuzz/cramberry_fuzz_test.go` - Message parsing
+- `fuzz/handshake_fuzz_test.go` - Handshake message parsing
+
+```bash
+go test -fuzz=FuzzDecrypt -fuzztime=30s ./fuzz/
+```
+
+### Stress Tests
+
+Concurrent stress tests for race condition verification:
+- `pkg/connection/stress_test.go` - State machine concurrency
+
+```bash
+go test -race -run="Test.*Concurrent" ./pkg/connection/...
+```
+
+### Integration Tests
+
+Full connection lifecycle tests:
+```bash
+make test-integration
+```
+
+### MockNode for Application Testing
+
+A MockNode implementation is provided for testing applications:
+
+```go
+import "github.com/blockberries/glueberry/pkg/testing"
+
+func TestMyApp(t *testing.T) {
+    mock := testing.NewMockNode()
+
+    // Simulate events
+    mock.EmitEvent(glueberry.ConnectionEvent{
+        PeerID: peerID,
+        State:  glueberry.StateConnected,
+    })
+
+    // Simulate incoming messages
+    mock.SimulateMessage(peerID, "stream", []byte("hello"))
+
+    // Verify sends
+    sent := mock.SentMessages()
+    assert.Len(t, sent, 1)
+}
+```
+
+## Examples
+
+Example applications are provided in the `examples/` directory:
+
+| Example | Description |
+|---------|-------------|
+| `basic/` | Minimal peer-to-peer connection |
+| `file-transfer/` | Chunked file transfer with progress |
+| `rpc/` | Request-response RPC pattern |
+| `cluster/` | Multi-node cluster mesh |
+| `blockberry-integration/` | Integration with Blockberry node |
+
+## Performance Considerations
+
+### Buffer Pooling
+
+Internal byte buffers are pooled to reduce GC pressure:
+- Message serialization buffers
+- Encryption/decryption buffers
+
+### Lazy Stream Opening
+
+Streams are created on first use, not during handshake completion. This:
+- Reduces connection overhead
+- Allows either peer to initiate communication
+- Avoids unused stream creation
+
+### Non-Blocking Events
+
+Event channels use non-blocking sends with metrics for drops:
+```go
+select {
+case eventChan <- event:
+    metrics.EventEmitted(event.State.String())
+default:
+    metrics.EventDropped()
+}
+```
+
+### Flow Control
+
+High/low watermark backpressure prevents memory exhaustion from fast producers.
+
+## Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0.0 | 2026-01-26 | Initial release |
+| 1.0.1 | 2026-01-26 | Stress tests, cramberry v1.2.0 |
