@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blockberries/glueberry/pkg/crypto"
+
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -252,9 +254,7 @@ func (pc *PeerConnection) Cleanup() {
 
 	// Securely zero and clear shared key
 	if pc.SharedKey != nil {
-		for i := range pc.SharedKey {
-			pc.SharedKey[i] = 0
-		}
+		crypto.SecureZero(pc.SharedKey)
 		pc.SharedKey = nil
 	}
 

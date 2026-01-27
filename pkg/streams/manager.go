@@ -490,9 +490,7 @@ func (m *Manager) CloseStreams(peerID peer.ID) error {
 
 	// Securely zero shared key before removing
 	if key, ok := m.sharedKeys[peerID]; ok {
-		for i := range key {
-			key[i] = 0
-		}
+		crypto.SecureZero(key)
 	}
 	delete(m.sharedKeys, peerID)
 
@@ -622,9 +620,7 @@ func (m *Manager) Shutdown() {
 
 	// Securely zero all shared keys before clearing the map
 	for _, key := range m.sharedKeys {
-		for i := range key {
-			key[i] = 0
-		}
+		crypto.SecureZero(key)
 	}
 
 	m.streams = make(map[peer.ID]map[string]*EncryptedStream)

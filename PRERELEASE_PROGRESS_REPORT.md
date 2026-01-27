@@ -2237,3 +2237,22 @@ The fix uses double-checked locking pattern with proper race handling - if two g
 - `node.go` - Wired config values to host creation
 
 ---
+
+### Phase 1.6: Key Material Memory Protection - Consistency Fix
+
+**Status:** ✅ Completed
+**Priority:** P1 (Security)
+
+**Issue:** Manual key zeroing (`for i := range key { key[i] = 0 }`) was used in some places instead of the `crypto.SecureZero()` function, which uses function variable indirection to prevent compiler optimization.
+
+**Fix:** Replaced all manual key zeroing with `crypto.SecureZero()`:
+- `pkg/streams/manager.go` - Updated `CloseStreams()` and `Shutdown()` to use `crypto.SecureZero()`
+- `pkg/connection/peer.go` - Updated `Cleanup()` to use `crypto.SecureZero()`
+
+This ensures consistent use of the secure zeroing function across the entire codebase, providing uniform protection against compiler optimization of dead stores.
+
+**Files Modified:**
+- `pkg/streams/manager.go` - Use `crypto.SecureZero()` instead of manual zeroing
+- `pkg/connection/peer.go` - Added crypto import, use `crypto.SecureZero()` instead of manual zeroing
+
+---
