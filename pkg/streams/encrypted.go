@@ -25,6 +25,10 @@ type IncomingMessage struct {
 // It receives the peer ID, stream name, and the actual size of the message.
 type OversizedMessageCallback func(peerID peer.ID, streamName string, size int)
 
+// MessageDroppedCallback is called when a message is dropped because the incoming
+// channel is full. It receives the peer ID and stream name.
+type MessageDroppedCallback func(peerID peer.ID, streamName string)
+
 // EncryptedStream provides transparent encryption/decryption over a libp2p stream.
 // It uses ChaCha20-Poly1305 for authenticated encryption and Cramberry for message framing.
 //
@@ -44,6 +48,7 @@ type EncryptedStream struct {
 	incoming           chan<- IncomingMessage
 	onDecryptionError  DecryptionErrorCallback
 	onOversizedMessage OversizedMessageCallback
+	onMessageDropped   MessageDroppedCallback
 	maxMessageSize     int
 	ctx                context.Context
 	cancel             context.CancelFunc
@@ -60,6 +65,10 @@ type EncryptedStreamConfig struct {
 
 	// OnOversizedMessage is called when a message exceeds MaxMessageSize (optional)
 	OnOversizedMessage OversizedMessageCallback
+
+	// OnMessageDropped is called when a message is dropped due to the incoming
+	// channel being full (optional). This allows tracking message drops.
+	OnMessageDropped MessageDroppedCallback
 
 	// MaxMessageSize is the maximum allowed message size in bytes.
 	// Messages exceeding this size are dropped and OnOversizedMessage is called.
@@ -97,6 +106,7 @@ func NewEncryptedStream(
 		incoming:           incoming,
 		onDecryptionError:  config.OnDecryptionError,
 		onOversizedMessage: config.OnOversizedMessage,
+		onMessageDropped:   config.OnMessageDropped,
 		maxMessageSize:     config.MaxMessageSize,
 		ctx:                streamCtx,
 		cancel:             cancel,
@@ -243,7 +253,9 @@ func (es *EncryptedStream) readLoop() {
 			return
 		default:
 			// Channel full - drop message to prevent blocking
-			// In production, might want to log this
+			if es.onMessageDropped != nil {
+				es.onMessageDropped(es.peerID, es.name)
+			}
 		}
 	}
 }

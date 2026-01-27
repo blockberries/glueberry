@@ -475,3 +475,77 @@ func TestEncryptedStream_OversizedMessageRejection(t *testing.T) {
 		// Expected - no message
 	}
 }
+
+func TestEncryptedStream_MessageDroppedCallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Use a tiny buffer to force message drops
+	incoming := make(chan IncomingMessage, 1)
+
+	peerID := mustParsePeerID(t, testPeerIDStr)
+
+	// Create crypto modules for both sides
+	priv1 := generateTestKey(t)
+	priv2 := generateTestKey(t)
+
+	mod1, _ := crypto.NewModule(priv1)
+	mod2, _ := crypto.NewModule(priv2)
+
+	// Derive matching shared keys
+	key1, _ := mod1.DeriveSharedKey(mod2.Ed25519PublicKey())
+	key2, _ := mod2.DeriveSharedKey(mod1.Ed25519PublicKey())
+
+	// Create pipes for bidirectional communication
+	r1, w1 := io.Pipe()
+	r2, w2 := io.Pipe()
+	stream1 := newMockStream(r2, w1)
+	stream2 := newMockStream(r1, w2)
+
+	// Track message dropped callback
+	var callbackMu sync.Mutex
+	var droppedCount int
+	var lastStreamName string
+
+	droppedCallback := func(pid peer.ID, streamName string) {
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		droppedCount++
+		lastStreamName = streamName
+	}
+
+	sender, err := NewEncryptedStream(ctx, "test-stream", peerID, stream1, key1, incoming, EncryptedStreamConfig{})
+	if err != nil {
+		t.Fatalf("NewEncryptedStream for sender failed: %v", err)
+	}
+	defer sender.Close()
+
+	receiver, err := NewEncryptedStream(ctx, "test-stream", peerID, stream2, key2, incoming, EncryptedStreamConfig{
+		OnMessageDropped: droppedCallback,
+	})
+	if err != nil {
+		t.Fatalf("NewEncryptedStream for receiver failed: %v", err)
+	}
+	defer receiver.Close()
+
+	// Send multiple messages quickly - the buffer should fill up
+	for i := 0; i < 5; i++ {
+		err = sender.Send([]byte("test message"))
+		if err != nil {
+			t.Fatalf("Send failed: %v", err)
+		}
+	}
+
+	// Wait for messages to be processed
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify that some messages were dropped
+	callbackMu.Lock()
+	if droppedCount == 0 {
+		t.Error("expected some messages to be dropped, but none were")
+	}
+	if lastStreamName != "test-stream" {
+		t.Errorf("stream name in callback = %q, want %q", lastStreamName, "test-stream")
+	}
+	callbackMu.Unlock()
+}

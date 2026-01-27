@@ -130,6 +130,16 @@ func New(cfg *Config) (*Node, error) {
 		}
 	})
 
+	// Wire up message dropped callback for logging and metrics
+	streamMgr.SetMessageDroppedCallback(func(peerID peer.ID, streamName string) {
+		if cfg.Logger != nil {
+			cfg.Logger.Warn("message dropped", "peer_id", peerID.String(), "stream", streamName, "reason", "buffer_full")
+		}
+		if cfg.Metrics != nil {
+			cfg.Metrics.MessageDropped()
+		}
+	})
+
 	// Create connection manager
 	connMgrConfig := connection.ManagerConfig{
 		HandshakeTimeout:        cfg.HandshakeTimeout,
@@ -816,7 +826,12 @@ func (n *Node) forwardMessagesWithStats() {
 				// Message delivered
 			default:
 				// Channel full - drop message
-				// In production, might want to log this
+				if n.logger != nil {
+					n.logger.Warn("message dropped", "peer_id", msg.PeerID.String(), "stream", msg.StreamName, "reason", "external_buffer_full")
+				}
+				if n.metrics != nil {
+					n.metrics.MessageDropped()
+				}
 			}
 		}
 	}
@@ -859,6 +874,9 @@ func (n *Node) forwardEvents() {
 				// Event delivered
 			default:
 				// Channel full - drop event
+				if n.logger != nil {
+					n.logger.Warn("event dropped", "peer_id", pubEvt.PeerID.String(), "state", pubEvt.State.String(), "reason", "buffer_full")
+				}
 				if n.metrics != nil {
 					n.metrics.EventDropped()
 				}

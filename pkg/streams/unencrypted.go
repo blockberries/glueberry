@@ -30,9 +30,10 @@ type UnencryptedStream struct {
 	writer  *cramberry.StreamWriter
 	writeMu sync.Mutex
 
-	incoming chan<- IncomingMessage
-	ctx      context.Context
-	cancel   context.CancelFunc
+	incoming         chan<- IncomingMessage
+	onMessageDropped MessageDroppedCallback
+	ctx              context.Context
+	cancel           context.CancelFunc
 
 	closed   bool
 	closeMu  sync.Mutex
@@ -65,6 +66,13 @@ func NewUnencryptedStream(
 	go us.readLoop()
 
 	return us
+}
+
+// SetOnMessageDropped sets the callback to be called when a message is dropped
+// due to the incoming channel being full. This must be called immediately after
+// NewUnencryptedStream and before any messages are received.
+func (us *UnencryptedStream) SetOnMessageDropped(callback MessageDroppedCallback) {
+	us.onMessageDropped = callback
 }
 
 // Send sends data over the stream without encryption.
@@ -173,6 +181,9 @@ func (us *UnencryptedStream) readLoop() {
 			return
 		default:
 			// Channel full - drop message to prevent blocking
+			if us.onMessageDropped != nil {
+				us.onMessageDropped(us.peerID, us.name)
+			}
 		}
 	}
 }

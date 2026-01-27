@@ -42,6 +42,9 @@ type Manager struct {
 	// onOversizedMessage is called when a message exceeds maxMessageSize (optional)
 	onOversizedMessage OversizedMessageCallback
 
+	// onMessageDropped is called when a message is dropped due to channel full (optional)
+	onMessageDropped MessageDroppedCallback
+
 	// maxMessageSize is the maximum allowed message size for received messages
 	maxMessageSize int
 
@@ -88,6 +91,14 @@ func (m *Manager) SetOversizedMessageCallback(callback OversizedMessageCallback)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onOversizedMessage = callback
+}
+
+// SetMessageDroppedCallback sets a callback function that is called when a message
+// is dropped because the incoming channel is full. This is useful for metrics.
+func (m *Manager) SetMessageDroppedCallback(callback MessageDroppedCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onMessageDropped = callback
 }
 
 // SetMaxMessageSize sets the maximum allowed size for received messages.
@@ -246,6 +257,9 @@ func (m *Manager) openUnencryptedStreamLazilyCtx(ctx context.Context, peerID pee
 	default:
 	}
 
+	// Copy config values we need for stream creation
+	onMessageDropped := m.onMessageDropped
+
 	// Release lock before network I/O to avoid blocking other operations
 	m.mu.Unlock()
 
@@ -263,6 +277,7 @@ func (m *Manager) openUnencryptedStreamLazilyCtx(ctx context.Context, peerID pee
 		rawStream,
 		m.incoming,
 	)
+	unencStream.SetOnMessageDropped(onMessageDropped)
 
 	// Re-acquire lock to store the stream
 	m.mu.Lock()
@@ -322,6 +337,7 @@ func (m *Manager) openStreamLazilyCtx(ctx context.Context, peerID peer.ID, strea
 	// Copy config values we need for stream creation
 	onDecryptionError := m.onDecryptionError
 	onOversizedMessage := m.onOversizedMessage
+	onMessageDropped := m.onMessageDropped
 	maxMessageSize := m.maxMessageSize
 	managerCtx := m.ctx
 	incoming := m.incoming
@@ -354,6 +370,7 @@ func (m *Manager) openStreamLazilyCtx(ctx context.Context, peerID peer.ID, strea
 		EncryptedStreamConfig{
 			OnDecryptionError:  onDecryptionError,
 			OnOversizedMessage: onOversizedMessage,
+			OnMessageDropped:   onMessageDropped,
 			MaxMessageSize:     maxMessageSize,
 		},
 	)
@@ -453,6 +470,7 @@ func (m *Manager) HandleIncomingHandshakeStream(
 		stream,
 		m.incoming,
 	)
+	unencStream.SetOnMessageDropped(m.onMessageDropped)
 
 	peerStreams[HandshakeStreamName] = unencStream
 	return nil
@@ -585,6 +603,7 @@ func (m *Manager) HandleIncomingStream(
 		EncryptedStreamConfig{
 			OnDecryptionError:  m.onDecryptionError,
 			OnOversizedMessage: m.onOversizedMessage,
+			OnMessageDropped:   m.onMessageDropped,
 			MaxMessageSize:     m.maxMessageSize,
 		},
 	)

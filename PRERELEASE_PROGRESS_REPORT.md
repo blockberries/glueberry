@@ -2323,3 +2323,60 @@ This ensures consistent use of the secure zeroing function across the entire cod
 - `TestClose` - Verifies Close() flushes pending changes before exiting
 
 ---
+
+### Phase 2.4: Add Message Drop Metrics and Logging
+
+**Status:** ✅ Completed
+**Priority:** P2 (Observability)
+
+**Issue:** Messages were being silently dropped when incoming channels were full, providing no visibility into potential issues. The existing `MessageDropped()` metric was defined but never called.
+
+**Solution:** Added comprehensive message drop tracking:
+1. **Added `MessageDroppedCallback`** - New callback type for tracking dropped messages
+2. **Added `OnMessageDropped` to EncryptedStreamConfig** - Optional callback when messages are dropped
+3. **Added `SetOnMessageDropped` to UnencryptedStream** - Setter for drop callback (preserves API compatibility)
+4. **Added `SetMessageDroppedCallback` to stream Manager** - Wires callback to all streams
+5. **Wired callbacks in Node** - Logs warnings and calls `metrics.MessageDropped()`
+6. **Added logging at node-level drops** - Event and message drops now logged with context
+
+**Drop Locations Covered:**
+- `pkg/streams/encrypted.go` - Encrypted stream incoming channel full
+- `pkg/streams/unencrypted.go` - Unencrypted stream incoming channel full
+- `node.go` - External message channel full
+- `node.go` - External event channel full
+
+**Log Format:**
+```
+level=WARN msg="message dropped" peer_id=<id> stream=<name> reason=buffer_full
+level=WARN msg="event dropped" peer_id=<id> state=<state> reason=buffer_full
+```
+
+**Files Modified:**
+- `pkg/streams/encrypted.go`:
+  - Added `MessageDroppedCallback` type
+  - Added `onMessageDropped` field to `EncryptedStream`
+  - Added `OnMessageDropped` field to `EncryptedStreamConfig`
+  - Updated `readLoop()` to call callback on drop
+
+- `pkg/streams/unencrypted.go`:
+  - Added `onMessageDropped` field to `UnencryptedStream`
+  - Added `SetOnMessageDropped()` method
+  - Updated `readLoop()` to call callback on drop
+
+- `pkg/streams/manager.go`:
+  - Added `onMessageDropped` field
+  - Added `SetMessageDroppedCallback()` method
+  - Wired callback to all stream creations
+
+- `node.go`:
+  - Added message dropped callback wiring to stream manager
+  - Added logging and metrics at external message channel drop
+  - Added logging at external event channel drop
+
+- `pkg/streams/encrypted_test.go`:
+  - Added `TestEncryptedStream_MessageDroppedCallback`
+
+**Test Coverage:**
+- `TestEncryptedStream_MessageDroppedCallback` - Verifies callback is invoked when channel is full
+
+---
