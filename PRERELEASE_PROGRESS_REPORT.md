@@ -2906,3 +2906,96 @@ func main() {
 - Span kinds set appropriately (Client, Producer, Consumer)
 
 ---
+
+### Phase 4.2.3: Health Check API
+
+**Status:** ✅ Completed
+**Priority:** P2 (Observability)
+
+**Issue:** Applications had no standard way to determine if a Glueberry node was healthy and ready to handle requests, making it difficult to integrate with container orchestrators like Kubernetes.
+
+**Solution:** Implemented a comprehensive health check API:
+
+1. **`IsHealthy() bool`** - Quick liveness check
+   - Returns true if node is started and host is running
+   - Suitable for Kubernetes liveness probes
+
+2. **`ReadinessChecks() HealthStatus`** - Detailed readiness check
+   - Performs multiple checks with timing info
+   - Returns structured results for debugging
+   - Suitable for Kubernetes readiness probes
+
+3. **HTTP Handlers**:
+   - `HealthHandler(node)` - Full health check endpoint
+   - `LivenessHandler(node)` - Quick liveness endpoint
+
+**Checks Performed:**
+| Check | Description | Affects Health |
+|-------|-------------|----------------|
+| `node_started` | Node has been started | Yes |
+| `host_running` | libp2p host is running | Yes |
+| `address_book` | Address book is accessible | Yes |
+| `connections` | Connection info (informational) | No |
+
+**Response Format:**
+```json
+{
+  "healthy": true,
+  "checks": [
+    {
+      "name": "node_started",
+      "healthy": true,
+      "message": "node is running",
+      "duration_ns": 1234
+    },
+    ...
+  ],
+  "timestamp": "2026-01-27T12:00:00Z"
+}
+```
+
+**HTTP Status Codes:**
+- `200 OK` - Node is healthy
+- `503 Service Unavailable` - Node is unhealthy
+
+**Files Created:**
+- `health.go`: Health check types and methods
+- `health_test.go`: Comprehensive tests
+
+**Example Usage:**
+```go
+// Quick check
+if node.IsHealthy() {
+    // Node is ready
+}
+
+// Detailed check
+status := node.ReadinessChecks()
+for _, check := range status.Checks {
+    fmt.Printf("%s: %v (%s)\n", check.Name, check.Healthy, check.Message)
+}
+
+// HTTP endpoints
+http.Handle("/health", glueberry.HealthHandler(node))
+http.Handle("/live", glueberry.LivenessHandler(node))
+http.ListenAndServe(":8080", nil)
+```
+
+**Kubernetes Integration:**
+```yaml
+livenessProbe:
+  httpGet:
+    path: /live
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+```
+
+---
