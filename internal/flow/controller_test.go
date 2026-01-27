@@ -345,3 +345,225 @@ func TestController_IsBlocked(t *testing.T) {
 		t.Error("should not be blocked at low watermark")
 	}
 }
+
+// TestController_StressBlockedWaiters tests that when 100+ goroutines are blocked
+// on backpressure, ALL of them unblock correctly when transitioning from blocked
+// to unblocked state. This tests the broadcast mechanism (close and recreate channel).
+func TestController_StressBlockedWaiters(t *testing.T) {
+	const numBlockedGoroutines = 150
+	const highWatermark = 10
+	const lowWatermark = 2
+
+	fc := NewController(highWatermark, lowWatermark)
+	ctx := context.Background()
+
+	// Fill up to high watermark to trigger blocking
+	for i := 0; i < highWatermark; i++ {
+		if err := fc.Acquire(ctx); err != nil {
+			t.Fatalf("Acquire %d failed: %v", i, err)
+		}
+	}
+
+	if !fc.IsBlocked() {
+		t.Fatal("expected flow controller to be blocked at high watermark")
+	}
+
+	// Track how many goroutines have unblocked
+	var unblocked atomic.Int32
+	var started sync.WaitGroup
+	var finished sync.WaitGroup
+
+	started.Add(numBlockedGoroutines)
+	finished.Add(numBlockedGoroutines)
+
+	// Start many goroutines that will block on Acquire
+	for i := 0; i < numBlockedGoroutines; i++ {
+		go func() {
+			started.Done() // Signal we're about to block
+
+			err := fc.Acquire(ctx)
+			if err != nil {
+				// Context error - shouldn't happen with background context
+				t.Errorf("Acquire returned error: %v", err)
+			}
+			unblocked.Add(1)
+
+			// Release immediately to not block others
+			fc.Release()
+			finished.Done()
+		}()
+	}
+
+	// Wait for all goroutines to start and be blocking
+	started.Wait()
+	time.Sleep(50 * time.Millisecond) // Give them time to block
+
+	// Verify no one has unblocked yet
+	if got := unblocked.Load(); got != 0 {
+		t.Errorf("expected 0 unblocked before Release, got %d", got)
+	}
+
+	// Release enough to drop below low watermark and trigger unblock broadcast
+	// We need to release (highWatermark - lowWatermark) to go from high to low
+	releasesNeeded := highWatermark - lowWatermark
+	for i := 0; i < releasesNeeded; i++ {
+		fc.Release()
+	}
+
+	// Wait for all goroutines to finish with a timeout
+	done := make(chan struct{})
+	go func() {
+		finished.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All goroutines finished successfully
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout: only %d/%d goroutines unblocked", unblocked.Load(), numBlockedGoroutines)
+	}
+
+	// Verify all goroutines unblocked
+	if got := unblocked.Load(); got != int32(numBlockedGoroutines) {
+		t.Errorf("expected %d unblocked, got %d", numBlockedGoroutines, got)
+	}
+
+	// Verify pending is back to reasonable level
+	// Note: pending may be non-zero if goroutines are still in flight
+	pending := fc.Pending()
+	t.Logf("Final pending count: %d", pending)
+}
+
+// TestController_StressMultipleBlockUnblockCycles tests multiple cycles of
+// blocking and unblocking with 100+ goroutines to ensure the broadcast
+// mechanism works correctly across multiple cycles.
+func TestController_StressMultipleBlockUnblockCycles(t *testing.T) {
+	const numGoroutines = 100
+	const numCycles = 5
+	const highWatermark = 5
+	const lowWatermark = 1
+
+	fc := NewController(highWatermark, lowWatermark)
+	ctx := context.Background()
+
+	for cycle := 0; cycle < numCycles; cycle++ {
+		t.Logf("Starting cycle %d", cycle)
+
+		// Fill up to high watermark
+		for i := 0; i < highWatermark; i++ {
+			if err := fc.Acquire(ctx); err != nil {
+				t.Fatalf("cycle %d: Acquire %d failed: %v", cycle, i, err)
+			}
+		}
+
+		if !fc.IsBlocked() {
+			t.Fatalf("cycle %d: expected blocked", cycle)
+		}
+
+		var unblocked atomic.Int32
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+
+		// Start goroutines that will block
+		for i := 0; i < numGoroutines; i++ {
+			go func() {
+				defer wg.Done()
+				if err := fc.Acquire(ctx); err == nil {
+					unblocked.Add(1)
+					fc.Release()
+				}
+			}()
+		}
+
+		// Give goroutines time to start blocking
+		time.Sleep(20 * time.Millisecond)
+
+		// Release to trigger unblock
+		for i := 0; i < highWatermark; i++ {
+			fc.Release()
+		}
+
+		// Wait for all with timeout
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// Success
+		case <-time.After(3 * time.Second):
+			t.Fatalf("cycle %d: timeout - %d/%d unblocked", cycle, unblocked.Load(), numGoroutines)
+		}
+
+		if got := unblocked.Load(); got != int32(numGoroutines) {
+			t.Errorf("cycle %d: expected %d unblocked, got %d", cycle, numGoroutines, got)
+		}
+	}
+}
+
+// TestController_StressConcurrentAcquireRelease tests heavy concurrent
+// acquire/release operations to verify no deadlocks or race conditions
+// under extreme load.
+func TestController_StressConcurrentAcquireRelease(t *testing.T) {
+	const numGoroutines = 200
+	const opsPerGoroutine = 500
+	const highWatermark = 50
+	const lowWatermark = 10
+
+	fc := NewController(highWatermark, lowWatermark)
+	ctx := context.Background()
+
+	var successfulOps atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines)
+
+	start := time.Now()
+
+	for g := 0; g < numGoroutines; g++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < opsPerGoroutine; i++ {
+				if err := fc.Acquire(ctx); err == nil {
+					successfulOps.Add(1)
+					// Brief work simulation
+					time.Sleep(time.Microsecond)
+					fc.Release()
+				}
+			}
+		}()
+	}
+
+	// Wait with timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout: test took too long, possible deadlock")
+	}
+
+	elapsed := time.Since(start)
+	ops := successfulOps.Load()
+	opsPerSec := float64(ops) / elapsed.Seconds()
+
+	t.Logf("Completed %d operations in %v (%.0f ops/sec)", ops, elapsed, opsPerSec)
+	t.Logf("Final pending: %d, blocked: %v", fc.Pending(), fc.IsBlocked())
+
+	// Verify all operations completed
+	if ops == 0 {
+		t.Error("expected some successful operations")
+	}
+
+	// Final pending should be 0
+	if fc.Pending() != 0 {
+		t.Errorf("expected final pending 0, got %d", fc.Pending())
+	}
+}

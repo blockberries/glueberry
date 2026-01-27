@@ -2999,3 +2999,162 @@ readinessProbe:
 ```
 
 ---
+
+## Phase 5: Comprehensive Testing
+
+**Status:** ✅ Completed
+**Priority:** P2 (Quality Assurance)
+
+### Summary
+
+Implemented comprehensive testing infrastructure including stress tests, chaos engineering tests, and load testing to verify correctness under extreme conditions and establish performance baselines.
+
+### Phase 5.1: Add Missing Test Coverage
+
+**Status:** ✅ Completed
+
+#### Phase 5.1.1: SecureZero Memory Zeroing Tests
+- **Status:** Already covered by existing tests in `pkg/crypto/secure_test.go`
+- Verified `TestSecureZero` provides comprehensive coverage
+
+#### Phase 5.1.2: Flow Controller Stress Tests (100+ goroutines)
+
+**Files Modified:**
+- `internal/flow/controller_test.go`
+
+**Tests Added:**
+- `TestController_StressBlockedWaiters` - 150 concurrent goroutines verifying ALL blocked waiters unblock when transitioning from blocked to unblocked state
+- `TestController_StressMultipleBlockUnblockCycles` - 100 goroutines × 5 cycles of blocking/unblocking
+- `TestController_StressConcurrentAcquireRelease` - 200 goroutines × 500 operations testing heavy concurrent acquire/release
+
+**Key Verification:** Confirmed the broadcast unblocking mechanism (close/recreate channel pattern) correctly unblocks all waiters, not just one.
+
+#### Phase 5.1.3: Oversized Message Rejection Tests
+- **Status:** Already covered by `TestEncryptedStream_OversizedMessageRejection` in `pkg/streams/encrypted_test.go`
+
+#### Phase 5.1.4: Handshake Timeout Race Tests
+- **Status:** Already covered by `TestHandshakeTimeoutVsCompletion` in `pkg/connection/stress_test.go`
+
+#### Phase 5.1.5: Stream Manager Concurrent Access Tests
+
+**Files Modified:**
+- `pkg/streams/manager_test.go`
+
+**Tests Added:**
+- `TestManager_ConcurrentEstablish` - Concurrent stream establishment
+- `TestManager_ConcurrentSend` - Concurrent message sending
+- `TestManager_ConcurrentOperations` - Mixed concurrent operations
+- `TestManager_StressSendToSamePeer` - High concurrency to single peer
+- `TestManager_HandleIncomingStream_Concurrent` - Concurrent incoming stream handling
+
+**Bug Fixed:** Race condition in `mockStreamOpener` - added mutex protection for the `streams` map.
+
+---
+
+### Phase 5.2: Chaos Engineering Tests
+
+**Status:** ✅ Completed
+
+**Files Created:**
+- `chaos_test.go`
+
+**Tests Implemented:**
+
+| Test | Description |
+|------|-------------|
+| `TestChaos_ConnectionDropDuringHandshake` | Simulates connection drop during handshake phase |
+| `TestChaos_RapidConnectDisconnect` | 20 rapid connection/disconnection cycles |
+| `TestChaos_ConcurrentPeerOperations` | 10 concurrent goroutines performing peer operations |
+| `TestChaos_EventChannelOverflow` | Tests behavior when event channels are full |
+| `TestChaos_SimultaneousShutdown` | Concurrent Stop() calls from 10 goroutines |
+| `TestChaos_OperationsAfterStop` | Verifies operations gracefully handle stopped node |
+| `TestChaos_MessageCorruptionRecovery` | Documents decryption error handling |
+| `TestChaos_ContextCancellation` | Tests context cancellation during operations |
+| `TestChaos_HighConcurrencyStress` | 50 goroutines × 20 operations under high load |
+| `TestChaos_NetworkPartitionSimulation` | Simulates network partition and recovery |
+| `TestChaos_LatencyInjection` | Documents stream-level timeout handling |
+
+**Key Findings:**
+- All operations handle stopped node gracefully
+- Event channel overflow is handled with non-blocking drops
+- Concurrent operations are properly serialized via mutexes
+- Context cancellation propagates correctly
+
+---
+
+### Phase 5.3: Load Testing
+
+**Status:** ✅ Completed
+
+**Files Created:**
+- `benchmark/load_test.go`
+
+**Benchmarks Implemented:**
+
+| Benchmark | Description |
+|-----------|-------------|
+| `BenchmarkNodeCreation` | Measures node creation time |
+| `BenchmarkNodeStartStop` | Measures start/stop cycle performance |
+| `BenchmarkAddPeer` | Measures peer addition performance |
+| `BenchmarkAddRemovePeer` | Measures peer add/remove cycle |
+| `BenchmarkListPeers_10/100/500/1000` | Measures peer listing at various scales |
+| `BenchmarkConcurrentAddPeer` | Measures concurrent peer addition |
+| `BenchmarkHealthCheck` | Measures `IsHealthy()` performance |
+| `BenchmarkReadinessChecks` | Measures `ReadinessChecks()` performance |
+| `BenchmarkKeyDerivation` | Measures ECDH key derivation |
+| `BenchmarkAddressBook_Add` | Measures address book add operation |
+| `BenchmarkAddressBook_List` | Measures address book listing |
+
+**Load Tests Implemented:**
+
+| Test | Description |
+|------|-------------|
+| `TestLoadScaling` | Reports performance scaling from 10 to 1000 peers |
+| `TestConcurrentLoadThroughput` | Reports throughput at 1-8 concurrent workers |
+
+**Sample Results (Reference):**
+```
+=== Load Scaling Report ===
+Peers:   10 | Add all: 52ms    | List: 1µs    | Health: 7ns
+Peers:   50 | Add all: 237ms   | List: 12µs   | Health: 5ns
+Peers:  100 | Add all: 472ms   | List: 20µs   | Health: 7ns
+Peers:  250 | Add all: 1.2s    | List: 22µs   | Health: 5ns
+Peers:  500 | Add all: 2.6s    | List: 37µs   | Health: 4ns
+Peers: 1000 | Add all: 6.0s    | List: 89µs   | Health: 5ns
+
+Memory Profile:
+Alloc: 23 MB | TotalAlloc: 1474 MB | Sys: 47 MB | NumGC: 306
+
+=== Concurrent Throughput Report (Address Book) ===
+Workers: 1 | Total ops: 100 | Throughput: 260 ops/sec
+Workers: 2 | Total ops: 200 | Throughput: 229 ops/sec
+Workers: 4 | Total ops: 400 | Throughput: 212 ops/sec
+Workers: 8 | Total ops: 800 | Throughput: 213 ops/sec
+```
+
+**Performance Observations:**
+- List operation scales linearly with peer count (O(n))
+- Health check is constant time (O(1))
+- Address book throughput is limited by file I/O (~200-250 ops/sec)
+- Memory usage is reasonable even with 1000+ peers
+
+---
+
+### Test Coverage Summary
+
+All Phase 5 tests pass with race detection enabled:
+
+```bash
+go test -race -timeout 300s ./...
+# All packages pass
+```
+
+**Files Created/Modified:**
+- `internal/flow/controller_test.go` - 3 stress tests added
+- `pkg/streams/manager_test.go` - 5 concurrent tests added, race condition fixed
+- `chaos_test.go` - 11 chaos engineering tests (NEW)
+- `benchmark/load_test.go` - 11 benchmarks + 2 load tests (NEW)
+
+**Total New Tests:** 21 tests added
+
+---
