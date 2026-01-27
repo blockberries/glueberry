@@ -2749,3 +2749,86 @@ cfg := glueberry.NewConfig(key, path, addrs,
 ```
 
 ---
+
+### Phase 4.2.1: Prometheus Metrics Adapter
+
+**Status:** ✅ Completed
+**Priority:** P2 (Observability)
+
+**Issue:** While Glueberry defined a Metrics interface with a NopMetrics implementation, there was no ready-to-use Prometheus implementation. Users had to implement the entire interface themselves.
+
+**Solution:** Created a complete Prometheus metrics adapter in a new `prometheus/` subpackage:
+
+1. **Created `prometheus/` subpackage** with full Prometheus implementation
+2. **Implemented all 17 metrics methods** from the glueberry.Metrics interface
+3. **Standard Prometheus naming conventions**:
+   - Counters: `*_total` suffix
+   - Histograms: `*_seconds` or `*_bytes` suffix
+   - Gauges: descriptive names
+4. **Configurable namespace** (default: "glueberry")
+5. **Custom registerer support** for testing and avoiding conflicts
+6. **Grafana dashboard template** with pre-built panels
+
+**Metrics Exposed:**
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `connections_opened_total` | Counter | direction | Connections opened |
+| `connections_closed_total` | Counter | direction | Connections closed |
+| `connection_attempts_total` | Counter | result | Connection attempts |
+| `handshake_duration_seconds` | Histogram | - | Handshake duration |
+| `handshake_results_total` | Counter | result | Handshake outcomes |
+| `messages_sent_total` | Counter | stream | Messages sent |
+| `messages_received_total` | Counter | stream | Messages received |
+| `bytes_sent_total` | Counter | stream | Bytes sent |
+| `bytes_received_total` | Counter | stream | Bytes received |
+| `streams_opened_total` | Counter | stream | Streams opened |
+| `streams_closed_total` | Counter | stream | Streams closed |
+| `encryption_errors_total` | Counter | - | Encryption failures |
+| `decryption_errors_total` | Counter | - | Decryption failures |
+| `key_derivations_total` | Counter | cached | Key derivations |
+| `events_emitted_total` | Counter | state | Events emitted |
+| `events_dropped_total` | Counter | - | Events dropped |
+| `messages_dropped_total` | Counter | - | Messages dropped |
+| `backpressure_engaged_total` | Counter | stream | Backpressure events |
+| `backpressure_wait_seconds` | Histogram | stream | Backpressure wait time |
+| `pending_messages` | Gauge | stream | Current pending msgs |
+
+**Files Created:**
+- `prometheus/metrics.go`: Complete Prometheus implementation with full documentation
+- `prometheus/metrics_test.go`: Comprehensive tests for all metrics
+- `prometheus/grafana-dashboard.json`: Ready-to-import Grafana dashboard
+
+**Example Usage:**
+```go
+import (
+    "github.com/blockberries/glueberry"
+    prommetrics "github.com/blockberries/glueberry/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+func main() {
+    metrics := prommetrics.NewMetrics("myapp")
+
+    cfg := glueberry.NewConfig(key, path, addrs,
+        glueberry.WithMetrics(metrics),
+    )
+
+    node, err := glueberry.New(cfg)
+    // ...
+
+    // Expose metrics endpoint
+    http.Handle("/metrics", promhttp.Handler())
+    http.ListenAndServe(":9090", nil)
+}
+```
+
+**Grafana Dashboard Features:**
+- Connection overview (rate, failure rate, handshake p95)
+- Message throughput by stream
+- Bytes sent/received over time
+- Security metrics (encryption/decryption errors)
+- Flow control (pending messages, backpressure)
+- Configurable namespace variable
+
+---
