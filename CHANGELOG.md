@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.5] - 2026-01-27
+
+### Fixed
+- **Medium**: Fixed memory leak where peer encryption keys remained cached after disconnect, causing unbounded memory growth with peer churn
+- Peer keys are now securely zeroed and removed from cache on both explicit disconnects and unexpected disconnects
+
+### Added
+- `RemovePeerKeyByEd25519()` method in crypto module for convenient key cleanup using Ed25519 public key
+
 ## [1.2.4] - 2026-01-27
 
 ### Changed
@@ -164,6 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Glueberry Version | Protocol Version | Cramberry Version | Go Version |
 |-------------------|------------------|-------------------|------------|
+| 1.2.5             | 1.2.5            | 1.4.3             | 1.21+      |
 | 1.2.4             | 1.2.4            | 1.4.3             | 1.21+      |
 | 1.2.3             | 1.2.3            | 1.4.2             | 1.21+      |
 | 1.2.2             | 1.2.2            | 1.4.2             | 1.21+      |
