@@ -2380,3 +2380,75 @@ level=WARN msg="event dropped" peer_id=<id> state=<state> reason=buffer_full
 - `TestEncryptedStream_MessageDroppedCallback` - Verifies callback is invoked when channel is full
 
 ---
+
+### Phase 2.5: Fix Read Loop Context Handling
+
+**Status:** ✅ Verified (No Change Needed)
+**Priority:** P2
+
+**Analysis:** The proposed issue was that context cancellation is only checked before blocking read, potentially causing delayed shutdown.
+
+**Verification:** After analyzing the code, this is a non-issue:
+1. When `Close()` is called on any stream, it both cancels the context AND closes the underlying stream
+2. Closing the underlying stream causes `reader.Next()` to return immediately with an error
+3. The read loop handles this error and exits promptly
+
+The proposed fix (adding read deadlines) would add unnecessary complexity without solving a real problem, since stream closure already unblocks the reader.
+
+---
+
+### Phase 2.6: Add Event Unsubscription
+
+**Status:** ✅ Completed
+**Priority:** P2 (Resource Management)
+
+**Issue:** Once you subscribe to filtered events, there was no clean way to unsubscribe. The subscription goroutine would run forever until the node stopped, potentially leaking resources.
+
+**Solution:** Implemented proper subscription lifecycle management:
+1. Created `EventSubscription` type that wraps a channel and cancel function
+2. Changed `eventSubs` from slice to map for efficient removal
+3. Added `Unsubscribe()` method to stop receiving events and clean up
+4. Updated `SubscribeEvents()`, `FilteredEvents()`, `EventsForPeer()`, `EventsForStates()` to return `*EventSubscription`
+
+**API Changes (Breaking):**
+- `FilteredEvents()` now returns `*EventSubscription` instead of `<-chan ConnectionEvent`
+- `EventsForPeer()` now returns `*EventSubscription` instead of `<-chan ConnectionEvent`
+- `EventsForStates()` now returns `*EventSubscription` instead of `<-chan ConnectionEvent`
+- Added new `SubscribeEvents()` method that returns `*EventSubscription`
+
+**Usage Example:**
+```go
+// Old API (no longer works):
+// ch := node.EventsForPeer(peerID)
+// for evt := range ch { ... }  // Runs forever
+
+// New API:
+sub := node.EventsForPeer(peerID)
+defer sub.Unsubscribe()  // Clean up when done
+for evt := range sub.Events() {
+    // Process events
+    if done {
+        break
+    }
+}
+```
+
+**Files Modified:**
+- `node.go`:
+  - Added `EventSubscription` type with `Events()` and `Unsubscribe()` methods
+  - Changed `eventSubs` from `[]chan ConnectionEvent` to `map[*EventSubscription]struct{}`
+  - Added `SubscribeEvents()` public method
+  - Updated `FilteredEvents()` to return `*EventSubscription`
+  - Updated `EventsForPeer()` to return `*EventSubscription`
+  - Updated `EventsForStates()` to return `*EventSubscription`
+  - Updated `forwardEvents()` to iterate over map
+
+- `events_filter_test.go`:
+  - Added `TestEventSubscription_Unsubscribe`
+  - Added `TestEventSubscription_Events`
+
+**Test Coverage:**
+- `TestEventSubscription_Unsubscribe` - Verifies unsubscribe removes subscription and calls cancel
+- `TestEventSubscription_Events` - Verifies Events() returns the subscription channel
+
+---

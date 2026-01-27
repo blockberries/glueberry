@@ -1,6 +1,7 @@
 package glueberry
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -145,5 +146,72 @@ func TestConnectionState_StringInFilter(t *testing.T) {
 		if str == "" {
 			t.Errorf("ConnectionState(%d).String() returned empty string", s)
 		}
+	}
+}
+
+func TestEventSubscription_Unsubscribe(t *testing.T) {
+	// Create a subscription with a mock node
+	ch := make(chan ConnectionEvent, 10)
+	done := make(chan struct{})
+
+	sub := &EventSubscription{
+		ch: ch,
+		cancel: func() {
+			close(done)
+		},
+		node: &Node{
+			eventSubs:   make(map[*EventSubscription]struct{}),
+			eventSubsMu: sync.RWMutex{},
+		},
+	}
+
+	// Add subscription to node
+	sub.node.eventSubs[sub] = struct{}{}
+
+	// Verify subscription exists
+	if len(sub.node.eventSubs) != 1 {
+		t.Errorf("expected 1 subscription, got %d", len(sub.node.eventSubs))
+	}
+
+	// Unsubscribe
+	sub.Unsubscribe()
+
+	// Verify subscription removed
+	if len(sub.node.eventSubs) != 0 {
+		t.Errorf("expected 0 subscriptions after unsubscribe, got %d", len(sub.node.eventSubs))
+	}
+
+	// Verify cancel was called
+	select {
+	case <-done:
+		// Expected
+	default:
+		t.Error("cancel function was not called")
+	}
+
+	// Verify double-unsubscribe is safe
+	sub.Unsubscribe() // Should not panic
+}
+
+func TestEventSubscription_Events(t *testing.T) {
+	ch := make(chan ConnectionEvent, 10)
+	sub := &EventSubscription{ch: ch}
+
+	// Verify Events() returns the channel
+	if sub.Events() != ch {
+		t.Error("Events() should return the subscription channel")
+	}
+
+	// Send an event and verify it's received
+	evt := ConnectionEvent{PeerID: peer.ID("test"), State: StateConnected}
+	ch <- evt
+
+	select {
+	case received := <-sub.Events():
+		if received.PeerID != evt.PeerID || received.State != evt.State {
+			t.Error("received event doesn't match sent event")
+		}
+	default:
+		t.Error("should have received event")
 	}
 }

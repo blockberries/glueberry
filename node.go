@@ -43,7 +43,7 @@ type Node struct {
 	messages       chan streams.IncomingMessage         // external channel for application
 
 	// Event subscribers for filtered events
-	eventSubs   []chan ConnectionEvent
+	eventSubs   map[*EventSubscription]struct{}
 	eventSubsMu sync.RWMutex
 
 	// Stats tracking
@@ -59,6 +59,43 @@ type Node struct {
 	cancel  context.CancelFunc
 	started bool
 	startMu sync.Mutex
+}
+
+// EventSubscription represents an active event subscription.
+// Call Unsubscribe() when you no longer need to receive events.
+type EventSubscription struct {
+	ch     chan ConnectionEvent
+	cancel context.CancelFunc
+	node   *Node
+	done   bool
+	mu     sync.Mutex
+}
+
+// Events returns the channel that receives events for this subscription.
+// The channel is closed when Unsubscribe() is called or when the node stops.
+func (s *EventSubscription) Events() <-chan ConnectionEvent {
+	return s.ch
+}
+
+// Unsubscribe stops the subscription and closes the event channel.
+// After calling Unsubscribe(), the Events() channel will be closed
+// and no more events will be delivered.
+func (s *EventSubscription) Unsubscribe() {
+	s.mu.Lock()
+	if s.done {
+		s.mu.Unlock()
+		return
+	}
+	s.done = true
+	s.mu.Unlock()
+
+	// Cancel the forwarding goroutine
+	s.cancel()
+
+	// Remove from node's subscription list
+	s.node.eventSubsMu.Lock()
+	delete(s.node.eventSubs, s)
+	s.node.eventSubsMu.Unlock()
 }
 
 // New creates a new Glueberry node with the given configuration.
@@ -169,6 +206,7 @@ func New(cfg *Config) (*Node, error) {
 		internalMsgs:    internalMsgsChan,
 		messages:        externalMsgsChan,
 		peerStats:       make(map[peer.ID]*PeerStatsTracker),
+		eventSubs:       make(map[*EventSubscription]struct{}),
 		flowControllers: make(map[string]*flow.Controller),
 		ctx:             ctx,
 		cancel:          cancel,
@@ -844,8 +882,8 @@ func (n *Node) forwardEvents() {
 		close(n.events)
 		// Close all subscriber channels
 		n.eventSubsMu.Lock()
-		for _, ch := range n.eventSubs {
-			close(ch)
+		for sub := range n.eventSubs {
+			close(sub.ch)
 		}
 		n.eventSubs = nil
 		n.eventSubsMu.Unlock()
@@ -884,9 +922,9 @@ func (n *Node) forwardEvents() {
 
 			// Forward to all subscribers (non-blocking)
 			n.eventSubsMu.RLock()
-			for _, ch := range n.eventSubs {
+			for sub := range n.eventSubs {
 				select {
-				case ch <- pubEvt:
+				case sub.ch <- pubEvt:
 					// Event delivered
 				default:
 					// Subscriber full - drop event for this subscriber
@@ -897,13 +935,31 @@ func (n *Node) forwardEvents() {
 	}
 }
 
-// subscribeEvents creates a new event subscriber channel.
-func (n *Node) subscribeEvents() chan ConnectionEvent {
+// SubscribeEvents creates a new event subscription that receives all events.
+// The caller should call Unsubscribe() when done to clean up resources.
+// The subscription's channel is closed when Unsubscribe() is called or when the node stops.
+func (n *Node) SubscribeEvents() *EventSubscription {
 	ch := make(chan ConnectionEvent, n.config.EventBufferSize)
+	ctx, cancel := context.WithCancel(n.ctx)
+
+	sub := &EventSubscription{
+		ch:     ch,
+		cancel: cancel,
+		node:   n,
+	}
+
+	// Start forwarding goroutine for this subscription
+	go func() {
+		<-ctx.Done()
+		// Context cancelled - close channel
+		close(ch)
+	}()
+
 	n.eventSubsMu.Lock()
-	n.eventSubs = append(n.eventSubs, ch)
+	n.eventSubs[sub] = struct{}{}
 	n.eventSubsMu.Unlock()
-	return ch
+
+	return sub
 }
 
 // EventFilter specifies which events to receive.
@@ -949,43 +1005,67 @@ func (f EventFilter) matches(evt ConnectionEvent) bool {
 	return true
 }
 
-// FilteredEvents returns a channel that receives only events matching the filter.
-// The returned channel is closed when the node is stopped.
+// FilteredEvents creates a new subscription that receives only events matching the filter.
+// The caller should call Unsubscribe() when done to clean up resources.
+// The subscription's channel is closed when Unsubscribe() is called or when the node stops.
 //
 // This method creates a new subscriber that receives a copy of all events,
 // so it can be used together with Events() without conflict. Each call to
 // FilteredEvents creates a new subscription.
-func (n *Node) FilteredEvents(filter EventFilter) <-chan ConnectionEvent {
+func (n *Node) FilteredEvents(filter EventFilter) *EventSubscription {
+	// Create base subscription
+	baseSub := n.SubscribeEvents()
+
+	// Create filtered channel
 	filtered := make(chan ConnectionEvent, n.config.EventBufferSize)
+	ctx, cancel := context.WithCancel(n.ctx)
 
-	// Subscribe to receive all events
-	subscription := n.subscribeEvents()
+	// Create filtered subscription
+	filteredSub := &EventSubscription{
+		ch:     filtered,
+		cancel: cancel,
+		node:   n,
+	}
 
+	// Start filtering goroutine
 	go func() {
 		defer close(filtered)
-		for evt := range subscription {
-			if filter.matches(evt) {
-				select {
-				case filtered <- evt:
-					// Event delivered
-				default:
-					// Channel full - drop event
+		for {
+			select {
+			case <-ctx.Done():
+				// Unsubscribed - also unsubscribe the base
+				baseSub.Unsubscribe()
+				return
+			case evt, ok := <-baseSub.Events():
+				if !ok {
+					// Base subscription closed
+					return
+				}
+				if filter.matches(evt) {
+					select {
+					case filtered <- evt:
+						// Event delivered
+					default:
+						// Channel full - drop event
+					}
 				}
 			}
 		}
 	}()
 
-	return filtered
+	return filteredSub
 }
 
-// EventsForPeer returns a channel that receives events only for the specified peer.
+// EventsForPeer creates a subscription that receives events only for the specified peer.
+// The caller should call Unsubscribe() when done to clean up resources.
 // This is a convenience wrapper around FilteredEvents.
-func (n *Node) EventsForPeer(peerID peer.ID) <-chan ConnectionEvent {
+func (n *Node) EventsForPeer(peerID peer.ID) *EventSubscription {
 	return n.FilteredEvents(EventFilter{PeerIDs: []peer.ID{peerID}})
 }
 
-// EventsForStates returns a channel that receives events only for the specified states.
+// EventsForStates creates a subscription that receives events only for the specified states.
+// The caller should call Unsubscribe() when done to clean up resources.
 // This is a convenience wrapper around FilteredEvents.
-func (n *Node) EventsForStates(states ...ConnectionState) <-chan ConnectionEvent {
+func (n *Node) EventsForStates(states ...ConnectionState) *EventSubscription {
 	return n.FilteredEvents(EventFilter{States: states})
 }
