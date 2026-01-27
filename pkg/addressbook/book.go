@@ -1,6 +1,7 @@
 package addressbook
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -9,15 +10,31 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
+const (
+	// flushInterval is how often the address book flushes dirty changes to disk.
+	flushInterval = 5 * time.Second
+)
+
 // Book manages the peer address book with persistence and thread-safe operations.
+// Changes are batched and periodically flushed to disk to reduce I/O overhead.
+// Critical changes (add, remove, blacklist) are saved immediately.
+// Non-critical changes (LastSeen updates) are batched and flushed periodically.
 type Book struct {
 	storage *storage
 	peers   map[string]*PeerEntry
 	mu      sync.RWMutex
+
+	// dirty indicates there are unsaved changes (from batched operations)
+	dirty bool
+
+	// ctx and cancel control the background flush goroutine
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // New creates a new address book with the given file path for persistence.
 // If the file exists, it loads the existing data. Otherwise, starts with an empty book.
+// The returned Book must be closed with Close() to ensure all changes are persisted.
 func New(path string) (*Book, error) {
 	s := newStorage(path)
 
@@ -26,10 +43,19 @@ func New(path string) (*Book, error) {
 		return nil, fmt.Errorf("failed to load address book: %w", err)
 	}
 
-	return &Book{
+	ctx, cancel := context.WithCancel(context.Background())
+
+	b := &Book{
 		storage: s,
 		peers:   data.Peers,
-	}, nil
+		ctx:     ctx,
+		cancel:  cancel,
+	}
+
+	// Start background flush goroutine
+	go b.flushLoop()
+
+	return b, nil
 }
 
 // AddPeer adds or updates a peer in the address book.
@@ -193,6 +219,7 @@ func (b *Book) UpdatePublicKey(peerID peer.ID, pubKey []byte) error {
 }
 
 // UpdateLastSeen updates the last seen timestamp for a peer.
+// This is a batched operation - changes are persisted periodically, not immediately.
 // Returns an error if the peer doesn't exist.
 func (b *Book) UpdateLastSeen(peerID peer.ID) error {
 	b.mu.Lock()
@@ -207,7 +234,8 @@ func (b *Book) UpdateLastSeen(peerID peer.ID) error {
 	now := time.Now()
 	entry.LastSeen = now
 	entry.UpdatedAt = now
-	return b.saveLocked()
+	b.dirty = true // Mark dirty for periodic flush, don't save immediately
+	return nil
 }
 
 // UpdateMetadata updates the metadata for a peer.
@@ -286,7 +314,11 @@ func (b *Book) saveLocked() error {
 		Version: currentVersion,
 		Peers:   b.peers,
 	}
-	return b.storage.save(data)
+	if err := b.storage.save(data); err != nil {
+		return err
+	}
+	b.dirty = false
+	return nil
 }
 
 // Reload reloads the address book from disk, discarding in-memory changes.
@@ -300,5 +332,54 @@ func (b *Book) Reload() error {
 	}
 
 	b.peers = data.Peers
+	b.dirty = false
+	return nil
+}
+
+// flushLoop runs in the background and periodically flushes dirty changes to disk.
+func (b *Book) flushLoop() {
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-b.ctx.Done():
+			return
+		case <-ticker.C:
+			b.mu.Lock()
+			if b.dirty {
+				// Ignore error in background flush - will retry next interval
+				_ = b.saveLocked()
+			}
+			b.mu.Unlock()
+		}
+	}
+}
+
+// Flush explicitly saves any pending changes to disk.
+// This is useful when you want to ensure changes are persisted immediately.
+func (b *Book) Flush() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if !b.dirty {
+		return nil
+	}
+	return b.saveLocked()
+}
+
+// Close stops the background flush goroutine and saves any pending changes.
+// The Book should not be used after Close is called.
+func (b *Book) Close() error {
+	// Stop the background goroutine
+	b.cancel()
+
+	// Flush any pending changes
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.dirty {
+		return b.saveLocked()
+	}
 	return nil
 }

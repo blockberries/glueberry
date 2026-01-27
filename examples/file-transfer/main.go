@@ -31,7 +31,7 @@ const (
 	msgComplete byte = 3
 
 	// File transfer message types
-	msgFileStart  byte = 10 // Start file transfer: [type][filename_len][filename][file_size]
+	msgFileStart byte = 10 // Start file transfer: [type][filename_len][filename][file_size]
 	msgFileChunk byte = 11 // File chunk: [type][chunk_index][chunk_data]
 	msgFileEnd   byte = 12 // End file transfer: [type][checksum]
 	msgFileAck   byte = 13 // Acknowledgment: [type][chunk_index]

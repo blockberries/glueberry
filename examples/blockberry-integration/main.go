@@ -83,12 +83,12 @@ type BlockchainNode struct {
 	publicKey ed25519.PublicKey
 
 	// Blockchain state (simplified)
-	height    uint64
-	heightMu  sync.RWMutex
+	height   uint64
+	heightMu sync.RWMutex
 
 	// Peer management
-	peers     map[peer.ID]*PeerState
-	peersMu   sync.RWMutex
+	peers        map[peer.ID]*PeerState
+	peersMu      sync.RWMutex
 	handshakes   map[peer.ID]*handshakeProgress
 	handshakesMu sync.Mutex
 

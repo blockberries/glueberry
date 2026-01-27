@@ -565,6 +565,10 @@ func TestPersistence(t *testing.T) {
 		book.AddPeer(peerID, []multiaddr.Multiaddr{addr}, map[string]string{"key": "value"})
 		book.UpdatePublicKey(peerID, pubKey)
 		book.UpdateLastSeen(peerID)
+		// Close flushes batched changes (like UpdateLastSeen) to disk
+		if err := book.Close(); err != nil {
+			t.Fatalf("Close() failed: %v", err)
+		}
 	}
 
 	// Reopen and verify
@@ -594,6 +598,108 @@ func TestPersistence(t *testing.T) {
 		if entry.LastSeen.IsZero() {
 			t.Error("LastSeen not persisted")
 		}
+	}
+}
+
+func TestBatchedPersistence(t *testing.T) {
+	path := tempFile(t)
+	peerID := mustParsePeerID(t, testPeerIDStr)
+	addr := mustParseMultiaddr(t, "/ip4/127.0.0.1/tcp/9000")
+
+	// Create book and add peer
+	book, err := New(path)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	// AddPeer should persist immediately
+	err = book.AddPeer(peerID, []multiaddr.Multiaddr{addr}, nil)
+	if err != nil {
+		t.Fatalf("AddPeer() failed: %v", err)
+	}
+
+	// UpdateLastSeen should NOT persist immediately (batched)
+	err = book.UpdateLastSeen(peerID)
+	if err != nil {
+		t.Fatalf("UpdateLastSeen() failed: %v", err)
+	}
+
+	// Verify LastSeen is set in memory
+	entry, _ := book.GetPeer(peerID)
+	if entry.LastSeen.IsZero() {
+		t.Error("LastSeen should be set in memory immediately")
+	}
+
+	// Reopen without Close - LastSeen should NOT be persisted
+	book2, err := New(path)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	entry2, _ := book2.GetPeer(peerID)
+	if !entry2.LastSeen.IsZero() {
+		t.Error("LastSeen should NOT be persisted without Close/Flush")
+	}
+	book2.Close()
+
+	// Now call Flush on original book
+	err = book.Flush()
+	if err != nil {
+		t.Fatalf("Flush() failed: %v", err)
+	}
+
+	// Reopen - LastSeen should now be persisted
+	book3, err := New(path)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	entry3, _ := book3.GetPeer(peerID)
+	if entry3.LastSeen.IsZero() {
+		t.Error("LastSeen should be persisted after Flush()")
+	}
+	book3.Close()
+
+	// Clean up original book
+	book.Close()
+}
+
+func TestClose(t *testing.T) {
+	path := tempFile(t)
+	peerID := mustParsePeerID(t, testPeerIDStr)
+	addr := mustParseMultiaddr(t, "/ip4/127.0.0.1/tcp/9000")
+
+	// Create book and add peer
+	book, err := New(path)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	err = book.AddPeer(peerID, []multiaddr.Multiaddr{addr}, nil)
+	if err != nil {
+		t.Fatalf("AddPeer() failed: %v", err)
+	}
+
+	// UpdateLastSeen is batched
+	err = book.UpdateLastSeen(peerID)
+	if err != nil {
+		t.Fatalf("UpdateLastSeen() failed: %v", err)
+	}
+
+	// Close should flush pending changes
+	err = book.Close()
+	if err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+
+	// Verify changes were persisted
+	book2, err := New(path)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer book2.Close()
+
+	entry, _ := book2.GetPeer(peerID)
+	if entry.LastSeen.IsZero() {
+		t.Error("LastSeen should be persisted after Close()")
 	}
 }
 

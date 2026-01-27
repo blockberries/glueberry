@@ -2280,3 +2280,46 @@ This ensures consistent use of the secure zeroing function across the entire cod
 - `node.go` - Added `cleanupStalePeerStats()` goroutine
 
 ---
+
+### Phase 2.1: Optimize Address Book Persistence
+
+**Status:** ✅ Completed
+**Priority:** P2 (Performance)
+
+**Issue:** Every address book mutation triggered immediate disk I/O. `UpdateLastSeen()` is called on every connection, causing excessive disk writes that can impact performance, especially on slower storage or with many connections.
+
+**Solution:** Implemented batched persistence for non-critical operations:
+- Critical changes (AddPeer, RemovePeer, Blacklist, UpdatePublicKey, UpdateMetadata, Clear) still persist immediately
+- Non-critical changes (UpdateLastSeen) are batched and flushed periodically
+- Background goroutine flushes dirty changes every 5 seconds
+- Explicit `Flush()` method for immediate persistence when needed
+- `Close()` method flushes pending changes and stops the background goroutine
+
+**Design Decisions:**
+1. **5-second flush interval**: Balances data safety with I/O reduction. Loss of at most 5 seconds of LastSeen updates on crash.
+2. **Background flush errors ignored**: Errors in periodic flush are silently ignored since they'll retry next interval. This prevents log spam.
+3. **Close() flushes synchronously**: Ensures no data loss on graceful shutdown.
+4. **Reload() clears dirty flag**: When reloading from disk, any pending in-memory changes are discarded.
+
+**Files Modified:**
+- `pkg/addressbook/book.go`:
+  - Added `dirty` flag, `ctx`, and `cancel` fields to Book struct
+  - Added `flushInterval` constant (5 seconds)
+  - Modified `New()` to start background flush goroutine
+  - Modified `UpdateLastSeen()` to mark dirty instead of saving immediately
+  - Modified `saveLocked()` to clear dirty flag after successful save
+  - Modified `Reload()` to clear dirty flag
+  - Added `flushLoop()` method for periodic background flushing
+  - Added `Flush()` method for explicit persistence
+  - Added `Close()` method to stop goroutine and flush pending changes
+
+- `pkg/addressbook/book_test.go`:
+  - Updated `TestPersistence` to call `Close()` before reopening
+  - Added `TestBatchedPersistence` to verify batched persistence behavior
+  - Added `TestClose` to verify Close flushes pending changes
+
+**Test Coverage:**
+- `TestBatchedPersistence` - Verifies UpdateLastSeen doesn't persist immediately, Flush() persists
+- `TestClose` - Verifies Close() flushes pending changes before exiting
+
+---
