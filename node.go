@@ -451,10 +451,6 @@ func (n *Node) DisconnectCtx(ctx context.Context, peerID peer.ID) error {
 // After calling this method, the node is ready to send/receive encrypted messages,
 // but the connection is not yet in StateEstablished. Call FinalizeHandshake() after
 // receiving confirmation from the peer to complete the handshake.
-//
-// This two-phase approach ensures both peers are ready before transitioning to
-// StateEstablished, avoiding race conditions where one peer sends encrypted messages
-// before the other is ready to receive them.
 func (n *Node) PrepareStreams(
 	peerID peer.ID,
 	peerPubKey ed25519.PublicKey,
@@ -567,38 +563,20 @@ func (n *Node) CancelReconnection(peerID peer.ID) error {
 	return n.connections.CancelReconnection(peerID)
 }
 
-// EstablishEncryptedStreams derives a shared key and establishes encrypted streams.
-// This should be called after successful handshake with the peer's Ed25519 public key.
-// It also registers handlers for incoming streams from the remote peer.
+// EstablishEncryptedStreams derives a shared key and prepares encrypted streams.
+// This should be called when the peer's Ed25519 public key is received during handshake.
+// It registers handlers for incoming streams from the remote peer.
 //
-// Deprecated: Use PrepareStreams() + FinalizeHandshake() for race-condition-free
-// stream establishment, or use CompleteHandshake() as a convenience wrapper.
-// EstablishEncryptedStreams will be removed in v2.0.0.
+// After calling this method, the node can send/receive encrypted messages, but the
+// connection is not yet in StateEstablished. Call CompleteHandshake() after receiving
+// confirmation from the peer to finalize the handshake.
 //
-// Migration:
-//
-//	// Old:
-//	node.EstablishEncryptedStreams(peerID, peerPubKey, streamNames)
-//
-//	// New (recommended - two-phase for race safety):
-//	node.PrepareStreams(peerID, peerPubKey, streamNames)
-//	// ... wait for peer to confirm they're ready ...
-//	node.FinalizeHandshake(peerID)
-//
-//	// Or (convenience wrapper):
-//	node.CompleteHandshake(peerID, peerPubKey, streamNames)
+// This is equivalent to PrepareStreams() but also handles incoming connection registration.
 func (n *Node) EstablishEncryptedStreams(
 	peerID peer.ID,
 	peerPubKey ed25519.PublicKey,
 	streamNames []string,
 ) error {
-	// Log deprecation warning
-	if n.logger != nil {
-		n.logger.Warn("EstablishEncryptedStreams is deprecated",
-			"peer_id", peerID.String(),
-			"recommendation", "use PrepareStreams + FinalizeHandshake or CompleteHandshake instead")
-	}
-
 	n.startMu.Lock()
 	if !n.started {
 		n.startMu.Unlock()
@@ -640,9 +618,6 @@ func (n *Node) EstablishEncryptedStreams(
 
 	// Store public key in address book (ignore error - not critical)
 	_ = n.addressBook.UpdatePublicKey(peerID, peerPubKey)
-
-	// Update connection state to Established (ignore error - streams already established)
-	_ = n.connections.MarkEstablished(peerID)
 
 	return nil
 }

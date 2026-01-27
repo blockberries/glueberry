@@ -81,30 +81,18 @@ Sent to 12D3KooWYYYY
 
 ### Handshake Flow
 
-The recommended two-phase handshake prevents race conditions where one peer sends
-encrypted messages before the other is ready to decrypt:
-
 ```go
-// After exchanging public keys via handshake stream...
+// Outgoing connection
+hs, _ := node.Connect(peerID)
+hs.Send(&HandshakeMessage{NodeName: "Alice", PublicKey: myPubKey})
+hs.Receive(&response)
+node.EstablishEncryptedStreams(peerID, remotePubKey, []string{"chat"})
 
-// Phase 1: Prepare streams (derive key, register handlers)
-// Now you can RECEIVE encrypted messages
-node.PrepareStreams(peerID, peerPubKey, []string{"chat"})
-
-// Send "Complete" message to peer so they know we're ready
-handshakeStream.Send([]byte{msgComplete})
-
-// Phase 2: Finalize handshake after peer confirms they're ready
-// Wait for peer's "Complete" message...
-node.FinalizeHandshake(peerID)
-// Now fully established - can send and receive
-```
-
-Or use the convenience wrapper if you don't need the two-phase safety:
-
-```go
-// Single call that does PrepareStreams + FinalizeHandshake
-node.CompleteHandshake(peerID, peerPubKey, []string{"chat"})
+// Incoming connection
+incoming := <-node.IncomingHandshakes()
+incoming.HandshakeStream.Receive(&msg)
+incoming.HandshakeStream.Send(&HandshakeMessage{...})
+node.EstablishEncryptedStreams(incoming.PeerID, remotePubKey, []string{"chat"})
 ```
 
 ## Notes
