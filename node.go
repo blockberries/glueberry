@@ -570,11 +570,35 @@ func (n *Node) CancelReconnection(peerID peer.ID) error {
 // EstablishEncryptedStreams derives a shared key and establishes encrypted streams.
 // This should be called after successful handshake with the peer's Ed25519 public key.
 // It also registers handlers for incoming streams from the remote peer.
+//
+// Deprecated: Use PrepareStreams() + FinalizeHandshake() for race-condition-free
+// stream establishment, or use CompleteHandshake() as a convenience wrapper.
+// EstablishEncryptedStreams will be removed in v2.0.0.
+//
+// Migration:
+//
+//	// Old:
+//	node.EstablishEncryptedStreams(peerID, peerPubKey, streamNames)
+//
+//	// New (recommended - two-phase for race safety):
+//	node.PrepareStreams(peerID, peerPubKey, streamNames)
+//	// ... wait for peer to confirm they're ready ...
+//	node.FinalizeHandshake(peerID)
+//
+//	// Or (convenience wrapper):
+//	node.CompleteHandshake(peerID, peerPubKey, streamNames)
 func (n *Node) EstablishEncryptedStreams(
 	peerID peer.ID,
 	peerPubKey ed25519.PublicKey,
 	streamNames []string,
 ) error {
+	// Log deprecation warning
+	if n.logger != nil {
+		n.logger.Warn("EstablishEncryptedStreams is deprecated",
+			"peer_id", peerID.String(),
+			"recommendation", "use PrepareStreams + FinalizeHandshake or CompleteHandshake instead")
+	}
+
 	n.startMu.Lock()
 	if !n.started {
 		n.startMu.Unlock()

@@ -2452,3 +2452,58 @@ for evt := range sub.Events() {
 - `TestEventSubscription_Events` - Verifies Events() returns the subscription channel
 
 ---
+
+### Phase 3.1: Consolidate Handshake APIs
+
+**Status:** ✅ Completed
+**Priority:** P2 (API Refinement)
+
+**Issue:** The codebase has both the original `EstablishEncryptedStreams()` API and the newer two-phase `PrepareStreams() + FinalizeHandshake()` API. Having both creates confusion about which to use, and the older API has potential race conditions where one peer might send encrypted messages before the other is ready to decrypt.
+
+**Solution:** Marked `EstablishEncryptedStreams()` as deprecated with clear migration guidance:
+
+1. **Godoc Deprecation Comment** - Added `// Deprecated:` godoc comment explaining:
+   - Why it's deprecated (race condition risk)
+   - What to use instead (`PrepareStreams + FinalizeHandshake` or `CompleteHandshake`)
+   - When it will be removed (v2.0.0)
+   - Migration examples showing old vs new code
+
+2. **Runtime Warning** - Added logger warning when the deprecated method is called to alert developers at runtime
+
+3. **Documentation Update** - Updated `examples/simple-chat/README.md` to show the modern two-phase handshake pattern as the recommended approach
+
+**Files Modified:**
+- `node.go`:
+  - Added `// Deprecated:` godoc comment with migration guide
+  - Added runtime deprecation warning via `n.logger.Warn()`
+
+- `examples/simple-chat/README.md`:
+  - Updated "Handshake Flow" section to show modern two-phase API
+  - Added code examples for `PrepareStreams()`, `FinalizeHandshake()`, and `CompleteHandshake()`
+
+**Migration Guide:**
+```go
+// Old (deprecated):
+node.EstablishEncryptedStreams(peerID, peerPubKey, streamNames)
+
+// New (recommended - two-phase for race safety):
+node.PrepareStreams(peerID, peerPubKey, streamNames)
+// ... signal peer that you're ready, wait for their signal ...
+node.FinalizeHandshake(peerID)
+
+// Or (convenience wrapper if you don't need two-phase safety):
+node.CompleteHandshake(peerID, peerPubKey, streamNames)
+```
+
+**Why Two-Phase Matters:**
+The two-phase approach prevents a race condition where:
+1. Alice calls `EstablishEncryptedStreams()` and immediately sends an encrypted message
+2. Bob hasn't finished his `EstablishEncryptedStreams()` yet
+3. Bob receives an encrypted message but can't decrypt it (no shared key yet)
+
+With two-phase:
+1. Both peers call `PrepareStreams()` - now both CAN receive encrypted messages
+2. Both peers signal they're ready (via handshake stream)
+3. Both peers call `FinalizeHandshake()` - now both can send AND receive
+
+---
