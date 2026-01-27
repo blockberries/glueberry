@@ -2482,3 +2482,42 @@ With `MarkEstablished` in `EstablishEncryptedStreams`, the connection would tran
 - Call `EstablishEncryptedStreams` when receiving pubkey, then `CompleteHandshake` when receiving confirmation
 
 ---
+
+### Phase 3.2: Add Windows Compatibility for File Locking
+
+**Status:** ✅ Completed
+**Priority:** P2 (Cross-Platform Support)
+
+**Issue:** The address book file locking used `syscall.Flock()` which is not available on Windows. This prevented the library from compiling on Windows.
+
+**Solution:** Split the file locking implementation into platform-specific files:
+
+1. **storage.go** - Platform-independent code (storage struct, load, save)
+2. **storage_unix.go** - Unix implementation using `syscall.Flock()`
+3. **storage_windows.go** - Windows implementation using `windows.LockFileEx()` / `windows.UnlockFileEx()`
+
+**Files Created:**
+- `pkg/addressbook/storage_unix.go`:
+  - Build tag: `//go:build !windows`
+  - Uses `syscall.Flock()` with `LOCK_EX` for exclusive locking
+  - Uses `syscall.Flock()` with `LOCK_UN` to release
+
+- `pkg/addressbook/storage_windows.go`:
+  - Build tag: `//go:build windows`
+  - Uses `windows.LockFileEx()` with `LOCKFILE_EXCLUSIVE_LOCK`
+  - Uses `windows.UnlockFileEx()` to release
+
+**Files Modified:**
+- `pkg/addressbook/storage.go`:
+  - Removed `syscall` import
+  - Removed `acquireFileLock()` and `releaseFileLock()` methods (moved to platform files)
+
+- `go.mod`:
+  - `golang.org/x/sys` promoted from indirect to direct dependency
+
+**Notes:**
+- Windows implementation uses overlapped I/O structures as required by the Windows API
+- Both implementations block until lock is acquired (no timeout)
+- Lock scope is 1 byte which is sufficient for advisory locking
+
+---
