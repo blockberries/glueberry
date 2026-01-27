@@ -2190,3 +2190,28 @@ m.mu.Unlock()
 - `pkg/connection/stress_test.go` - Added `TestHandshakeTimeoutVsCompletion` stress test
 
 ---
+
+### Phase 1.4: Fix Stream Manager Lock During Network I/O
+
+**Status:** ✅ Completed
+**Priority:** P1 (Performance/Correctness)
+
+**Issue:** Both `openUnencryptedStreamLazilyCtx` and `openStreamLazilyCtx` held the manager mutex while calling `m.host.NewStream()`, which performs network I/O. This could:
+1. Block all other stream operations while one stream is being opened
+2. Cause deadlocks if network operations hang
+3. Severely degrade performance under load
+
+**Fix:** Restructured both functions to:
+1. Acquire lock, check if stream exists, get required data (shared key, config)
+2. Release lock before network I/O
+3. Open the libp2p stream without holding the lock
+4. Re-acquire lock
+5. Check if another goroutine created a stream while we were waiting (race handling)
+6. Store our stream or use the existing one
+
+The fix uses double-checked locking pattern with proper race handling - if two goroutines try to open the same stream simultaneously, one will win and the other will close its stream and use the winner's stream.
+
+**Files Modified:**
+- `pkg/streams/manager.go` - Restructured `openUnencryptedStreamLazilyCtx` and `openStreamLazilyCtx` to release lock before network I/O
+
+---

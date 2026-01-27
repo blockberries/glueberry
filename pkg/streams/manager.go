@@ -219,6 +219,7 @@ func (m *Manager) sendUnencryptedCtx(ctx context.Context, peerID peer.ID, stream
 }
 
 // openUnencryptedStreamLazilyCtx opens an unencrypted stream on-demand with context support.
+// It releases the lock before network I/O to avoid blocking other operations.
 func (m *Manager) openUnencryptedStreamLazilyCtx(ctx context.Context, peerID peer.ID, streamName string) (*UnencryptedStream, error) {
 	// Check context before acquiring lock
 	select {
@@ -228,23 +229,27 @@ func (m *Manager) openUnencryptedStreamLazilyCtx(ctx context.Context, peerID pee
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
-	// Double-check stream doesn't exist
+	// Check if stream already exists
 	if peerStreams, ok := m.unencryptedStreams[peerID]; ok {
 		if stream, exists := peerStreams[streamName]; exists && !stream.IsClosed() {
+			m.mu.Unlock()
 			return stream, nil
 		}
 	}
 
-	// Check context again after acquiring lock
+	// Check context before network I/O
 	select {
 	case <-ctx.Done():
+		m.mu.Unlock()
 		return nil, ctx.Err()
 	default:
 	}
 
-	// Open libp2p stream using the provided context
+	// Release lock before network I/O to avoid blocking other operations
+	m.mu.Unlock()
+
+	// Open libp2p stream using the provided context (network I/O without holding lock)
 	rawStream, err := m.host.NewStream(ctx, peerID, streamName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open stream %q: %w", streamName, err)
@@ -259,6 +264,19 @@ func (m *Manager) openUnencryptedStreamLazilyCtx(ctx context.Context, peerID pee
 		m.incoming,
 	)
 
+	// Re-acquire lock to store the stream
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if another goroutine created a stream while we were doing I/O
+	if peerStreams, ok := m.unencryptedStreams[peerID]; ok {
+		if existingStream, exists := peerStreams[streamName]; exists && !existingStream.IsClosed() {
+			// Another goroutine beat us - close our stream and use theirs
+			_ = rawStream.Close()
+			return existingStream, nil
+		}
+	}
+
 	// Store the stream
 	if _, ok := m.unencryptedStreams[peerID]; !ok {
 		m.unencryptedStreams[peerID] = make(map[string]*UnencryptedStream)
@@ -269,6 +287,7 @@ func (m *Manager) openUnencryptedStreamLazilyCtx(ctx context.Context, peerID pee
 }
 
 // openStreamLazilyCtx opens a stream on-demand with context support.
+// It releases the lock before network I/O to avoid blocking other operations.
 func (m *Manager) openStreamLazilyCtx(ctx context.Context, peerID peer.ID, streamName string) (*EncryptedStream, error) {
 	// Check context before acquiring lock
 	select {
@@ -278,34 +297,47 @@ func (m *Manager) openStreamLazilyCtx(ctx context.Context, peerID peer.ID, strea
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
-	// Double-check stream doesn't exist (may have been created while waiting for lock)
+	// Check if stream already exists
 	if peerStreams, ok := m.streams[peerID]; ok {
 		if stream, exists := peerStreams[streamName]; exists && !stream.IsClosed() {
+			m.mu.Unlock()
 			return stream, nil
 		}
 	}
 
 	// Check if this stream name is allowed
 	if allowedStreams, ok := m.allowedStreams[peerID]; !ok || !allowedStreams[streamName] {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("stream %q not allowed for peer %s (call EstablishStreams first)", streamName, peerID)
 	}
 
-	// Get shared key
+	// Get shared key (copy it since we'll release the lock)
 	sharedKey, ok := m.sharedKeys[peerID]
 	if !ok {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("no shared key for peer %s (call EstablishStreams first)", peerID)
 	}
 
-	// Check context again after acquiring lock
+	// Copy config values we need for stream creation
+	onDecryptionError := m.onDecryptionError
+	onOversizedMessage := m.onOversizedMessage
+	maxMessageSize := m.maxMessageSize
+	managerCtx := m.ctx
+	incoming := m.incoming
+
+	// Check context before network I/O
 	select {
 	case <-ctx.Done():
+		m.mu.Unlock()
 		return nil, ctx.Err()
 	default:
 	}
 
-	// Open libp2p stream using the provided context
+	// Release lock before network I/O to avoid blocking other operations
+	m.mu.Unlock()
+
+	// Open libp2p stream using the provided context (network I/O without holding lock)
 	rawStream, err := m.host.NewStream(ctx, peerID, streamName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open stream %q: %w", streamName, err)
@@ -313,21 +345,34 @@ func (m *Manager) openStreamLazilyCtx(ctx context.Context, peerID peer.ID, strea
 
 	// Create encrypted stream with config
 	encStream, err := NewEncryptedStream(
-		m.ctx,
+		managerCtx,
 		streamName,
 		peerID,
 		rawStream,
 		sharedKey,
-		m.incoming,
+		incoming,
 		EncryptedStreamConfig{
-			OnDecryptionError:  m.onDecryptionError,
-			OnOversizedMessage: m.onOversizedMessage,
-			MaxMessageSize:     m.maxMessageSize,
+			OnDecryptionError:  onDecryptionError,
+			OnOversizedMessage: onOversizedMessage,
+			MaxMessageSize:     maxMessageSize,
 		},
 	)
 	if err != nil {
 		rawStream.Close()
 		return nil, fmt.Errorf("failed to create encrypted stream %q: %w", streamName, err)
+	}
+
+	// Re-acquire lock to store the stream
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if another goroutine created a stream while we were doing I/O
+	if peerStreams, ok := m.streams[peerID]; ok {
+		if existingStream, exists := peerStreams[streamName]; exists && !existingStream.IsClosed() {
+			// Another goroutine beat us - close our stream and use theirs
+			encStream.Close()
+			return existingStream, nil
+		}
 	}
 
 	// Store the stream
