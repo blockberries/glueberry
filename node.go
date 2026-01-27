@@ -64,17 +64,26 @@ type Node struct {
 // EventSubscription represents an active event subscription.
 // Call Unsubscribe() when you no longer need to receive events.
 type EventSubscription struct {
-	ch     chan ConnectionEvent
-	cancel context.CancelFunc
-	node   *Node
-	done   bool
-	mu     sync.Mutex
+	ch        chan ConnectionEvent
+	cancel    context.CancelFunc
+	node      *Node
+	done      bool
+	mu        sync.Mutex
+	closeOnce sync.Once // Ensures channel is closed only once
 }
 
 // Events returns the channel that receives events for this subscription.
 // The channel is closed when Unsubscribe() is called or when the node stops.
 func (s *EventSubscription) Events() <-chan ConnectionEvent {
 	return s.ch
+}
+
+// closeChannel safely closes the subscription channel exactly once.
+// This is safe to call from multiple goroutines concurrently.
+func (s *EventSubscription) closeChannel() {
+	s.closeOnce.Do(func() {
+		close(s.ch)
+	})
 }
 
 // Unsubscribe stops the subscription and closes the event channel.
@@ -927,10 +936,10 @@ func (n *Node) forwardMessagesWithStats() {
 func (n *Node) forwardEvents() {
 	defer func() {
 		close(n.events)
-		// Close all subscriber channels
+		// Safely close all subscriber channels (may race with individual unsubscribe goroutines)
 		n.eventSubsMu.Lock()
 		for sub := range n.eventSubs {
-			close(sub.ch)
+			sub.closeChannel()
 		}
 		n.eventSubs = nil
 		n.eventSubsMu.Unlock()
@@ -998,8 +1007,8 @@ func (n *Node) SubscribeEvents() *EventSubscription {
 	// Start forwarding goroutine for this subscription
 	go func() {
 		<-ctx.Done()
-		// Context cancelled - close channel
-		close(ch)
+		// Context cancelled - safely close channel (may race with forwardEvents defer)
+		sub.closeChannel()
 	}()
 
 	n.eventSubsMu.Lock()

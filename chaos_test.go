@@ -618,3 +618,80 @@ func (fr *flakyReader) Read(p []byte) (n int, err error) {
 
 	return fr.inner.Read(p)
 }
+
+// TestChaos_SubscriptionDoubleClose verifies that concurrent unsubscribe
+// and node shutdown don't cause a "close of closed channel" panic.
+// This tests the fix for the double-close race in subscription channels.
+func TestChaos_SubscriptionDoubleClose(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping chaos test in short mode")
+	}
+
+	priv := generateChaosTestKey(t)
+	listenAddr, _ := multiaddr.NewMultiaddr("/ip4/127.0.0.1/tcp/0")
+	cfg := NewConfig(priv, t.TempDir()+"/addresses.json", []multiaddr.Multiaddr{listenAddr})
+
+	node, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	if err := node.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Create multiple subscriptions
+	const numSubscriptions = 10
+	subs := make([]*EventSubscription, numSubscriptions)
+	for i := 0; i < numSubscriptions; i++ {
+		subs[i] = node.SubscribeEvents()
+	}
+
+	// Run the race: unsubscribe some while stopping node
+	var wg sync.WaitGroup
+
+	// Half will unsubscribe
+	for i := 0; i < numSubscriptions/2; i++ {
+		wg.Add(1)
+		go func(sub *EventSubscription) {
+			defer wg.Done()
+			time.Sleep(time.Millisecond * time.Duration(i%5)) // Stagger slightly
+			sub.Unsubscribe()
+		}(subs[i])
+	}
+
+	// Simultaneously stop the node (which closes remaining subscriptions)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(time.Millisecond * 2)
+		_ = node.Stop()
+	}()
+
+	// Wait for all operations
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success - no panic occurred
+		t.Log("Subscription double-close race test passed")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Test timed out - possible deadlock")
+	}
+
+	// Verify all channels are closed by trying to read from them
+	for i, sub := range subs {
+		select {
+		case _, ok := <-sub.Events():
+			if ok {
+				t.Errorf("subscription %d channel should be closed", i)
+			}
+		default:
+			// Channel is either closed or empty, both are acceptable
+		}
+	}
+}

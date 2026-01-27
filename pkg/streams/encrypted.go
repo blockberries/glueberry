@@ -54,7 +54,7 @@ type EncryptedStream struct {
 	cancel             context.CancelFunc
 
 	closed   bool
-	closeMu  sync.Mutex
+	closeMu  sync.RWMutex
 	closeErr error
 }
 
@@ -135,22 +135,25 @@ func (es *EncryptedStream) SendCtx(ctx context.Context, data []byte) error {
 	default:
 	}
 
-	es.closeMu.Lock()
+	// Hold read lock through closed check AND encryption to prevent
+	// Close() from zeroing the cipher key while we're encrypting.
+	es.closeMu.RLock()
 	if es.closed {
-		es.closeMu.Unlock()
+		es.closeMu.RUnlock()
 		return fmt.Errorf("stream is closed")
 	}
-	es.closeMu.Unlock()
 
 	// Check context again after checking closed state
 	select {
 	case <-ctx.Done():
+		es.closeMu.RUnlock()
 		return ctx.Err()
 	default:
 	}
 
-	// Encrypt the data
+	// Encrypt the data (still holding RLock to prevent concurrent Close)
 	encrypted, err := es.cipher.Encrypt(data, nil)
+	es.closeMu.RUnlock() // Release after encryption completes
 	if err != nil {
 		return fmt.Errorf("encryption failed: %w", err)
 	}
@@ -221,6 +224,8 @@ func (es *EncryptedStream) readLoop() {
 			if es.onOversizedMessage != nil {
 				es.onOversizedMessage(es.peerID, es.name, len(encrypted))
 			}
+			// Securely zero the buffer before dropping
+			crypto.SecureZero(encrypted)
 			// Drop oversized message and continue
 			continue
 		}
@@ -269,20 +274,27 @@ func (es *EncryptedStream) Close() error {
 		es.closeMu.Unlock()
 		return err
 	}
-	es.closeMu.Unlock()
+	// Mark as closed while holding lock to prevent new SendCtx operations
+	es.closed = true
 
-	// Cancel context to stop read loop
-	es.cancel()
-
-	// Close the cipher to zero key material
+	// Close the cipher to zero key material while holding lock
+	// This prevents SendCtx from using the cipher after key is zeroed
 	if es.cipher != nil {
 		es.cipher.Close()
 	}
+	es.closeMu.Unlock()
+
+	// Cancel context to stop read loop (safe to do after releasing lock)
+	es.cancel()
 
 	// Close the underlying stream
 	err := es.stream.Close()
 
-	es.markClosed(err)
+	// Record the close error
+	es.closeMu.Lock()
+	es.closeErr = err
+	es.closeMu.Unlock()
+
 	return err
 }
 
@@ -302,8 +314,8 @@ func (es *EncryptedStream) markClosed(err error) {
 
 // IsClosed returns true if the stream is closed.
 func (es *EncryptedStream) IsClosed() bool {
-	es.closeMu.Lock()
-	defer es.closeMu.Unlock()
+	es.closeMu.RLock()
+	defer es.closeMu.RUnlock()
 	return es.closed
 }
 
