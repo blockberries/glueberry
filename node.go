@@ -168,6 +168,7 @@ func New(cfg *Config) (*Node, error) {
 	// Start forwarding goroutines
 	go node.forwardMessagesWithStats()
 	go node.forwardEvents()
+	go node.cleanupStalePeerStats()
 
 	return node, nil
 }
@@ -723,6 +724,40 @@ func (n *Node) getOrCreatePeerStats(peerID peer.ID) *PeerStatsTracker {
 		n.peerStats[peerID] = tracker
 	}
 	return tracker
+}
+
+// cleanupStalePeerStats periodically removes stats for peers that haven't been
+// active for a long time. This prevents the peerStats map from growing unboundedly.
+func (n *Node) cleanupStalePeerStats() {
+	const (
+		cleanupInterval = 1 * time.Hour
+		staleThreshold  = 24 * time.Hour
+	)
+
+	ticker := time.NewTicker(cleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			n.peerStatsMu.Lock()
+			for peerID, tracker := range n.peerStats {
+				// Don't remove stats for currently connected peers
+				conn := n.connections.GetConnection(peerID)
+				if conn != nil && conn.GetState() == connection.StateEstablished {
+					continue
+				}
+
+				// Remove if last activity was more than staleThreshold ago
+				if time.Since(tracker.LastActivity()) > staleThreshold {
+					delete(n.peerStats, peerID)
+				}
+			}
+			n.peerStatsMu.Unlock()
+		}
+	}
 }
 
 // getOrCreateFlowController returns the flow controller for a stream,

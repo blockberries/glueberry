@@ -228,3 +228,18 @@ func (s *PeerStatsTracker) Snapshot(peerID peer.ID, connected bool, isOutbound b
 
 	return stats
 }
+
+// LastActivity returns the time of last activity for this peer.
+// This is the most recent of connectedAt or lastMessageAt.
+func (s *PeerStatsTracker) LastActivity() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// If currently connected, use now as last activity
+	if !s.connectedAt.IsZero() {
+		return time.Now()
+	}
+
+	// Otherwise, use the last message time
+	return s.lastMessageAt
+}

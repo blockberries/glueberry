@@ -2256,3 +2256,27 @@ This ensures consistent use of the secure zeroing function across the entire cod
 - `pkg/connection/peer.go` - Added crypto import, use `crypto.SecureZero()` instead of manual zeroing
 
 ---
+
+## Phase 2: Stability & Performance (P2)
+
+### Phase 2.3: Add Peer Stats Cleanup
+
+**Status:** ✅ Completed
+**Priority:** P2 (Resource Management)
+
+**Issue:** The `peerStats` map in Node grows unboundedly as peers connect over time, even after they disconnect. This can lead to memory growth in long-running nodes.
+
+**Fix:**
+1. Added `LastActivity()` method to `PeerStatsTracker` that returns the time of last activity
+2. Added `cleanupStalePeerStats()` goroutine to Node that runs hourly
+3. Cleanup removes stats for peers that:
+   - Are not currently connected (StateEstablished)
+   - Haven't had any activity in the last 24 hours
+
+**Configuration:** The cleanup interval (1 hour) and stale threshold (24 hours) are hardcoded constants. They can be made configurable if needed.
+
+**Files Modified:**
+- `stats.go` - Added `LastActivity()` method to `PeerStatsTracker`
+- `node.go` - Added `cleanupStalePeerStats()` goroutine
+
+---
