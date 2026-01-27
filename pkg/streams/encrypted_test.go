@@ -66,13 +66,13 @@ func TestEncryptedStream_Send(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 10)
 
-	sender, err := NewEncryptedStream(ctx, "test", peerID, stream1, key1, incoming, nil)
+	sender, err := NewEncryptedStream(ctx, "test", peerID, stream1, key1, incoming, EncryptedStreamConfig{})
 	if err != nil {
 		t.Fatalf("NewEncryptedStream failed: %v", err)
 	}
 	defer sender.Close()
 
-	receiver, err := NewEncryptedStream(ctx, "test", peerID, stream2, key2, incoming, nil)
+	receiver, err := NewEncryptedStream(ctx, "test", peerID, stream2, key2, incoming, EncryptedStreamConfig{})
 	if err != nil {
 		t.Fatalf("NewEncryptedStream failed: %v", err)
 	}
@@ -124,10 +124,10 @@ func TestEncryptedStream_MultipleMessages(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 10)
 
-	sender, _ := NewEncryptedStream(ctx, "test", peerID, stream1, key1, incoming, nil)
+	sender, _ := NewEncryptedStream(ctx, "test", peerID, stream1, key1, incoming, EncryptedStreamConfig{})
 	defer sender.Close()
 
-	receiver, _ := NewEncryptedStream(ctx, "test", peerID, stream2, key1, incoming, nil)
+	receiver, _ := NewEncryptedStream(ctx, "test", peerID, stream2, key1, incoming, EncryptedStreamConfig{})
 	defer receiver.Close()
 
 	// Send multiple messages
@@ -171,7 +171,7 @@ func TestEncryptedStream_Close(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 10)
 
-	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming, nil)
+	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming, EncryptedStreamConfig{})
 
 	err := es.Close()
 	if err != nil {
@@ -203,7 +203,7 @@ func TestEncryptedStream_Name(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 10)
 
-	es, _ := NewEncryptedStream(ctx, "my-stream", peerID, stream, key, incoming, nil)
+	es, _ := NewEncryptedStream(ctx, "my-stream", peerID, stream, key, incoming, EncryptedStreamConfig{})
 	defer es.Close()
 
 	if es.Name() != "my-stream" {
@@ -230,7 +230,7 @@ func TestEncryptedStream_ConcurrentSend(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 100)
 
-	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming, nil)
+	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming, EncryptedStreamConfig{})
 	defer es.Close()
 
 	// Send from multiple goroutines
@@ -270,7 +270,7 @@ func TestEncryptedStream_ReadLoopEOF(t *testing.T) {
 	peerID := mustParsePeerID(t, testPeerIDStr)
 	incoming := make(chan IncomingMessage, 10)
 
-	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming, nil)
+	es, _ := NewEncryptedStream(ctx, "test", peerID, stream, key, incoming, EncryptedStreamConfig{})
 
 	// Wait a bit for read loop to encounter EOF
 	time.Sleep(50 * time.Millisecond)
@@ -327,13 +327,15 @@ func TestEncryptedStream_DecryptionErrorCallback(t *testing.T) {
 		callbackErr = err
 	}
 
-	sender, err := NewEncryptedStream(ctx, "test", peerID, stream1, senderKey, incoming, nil)
+	sender, err := NewEncryptedStream(ctx, "test", peerID, stream1, senderKey, incoming, EncryptedStreamConfig{})
 	if err != nil {
 		t.Fatalf("NewEncryptedStream for sender failed: %v", err)
 	}
 	defer sender.Close()
 
-	receiver, err := NewEncryptedStream(ctx, "test", peerID, stream2, receiverKey, incoming, errorCallback)
+	receiver, err := NewEncryptedStream(ctx, "test", peerID, stream2, receiverKey, incoming, EncryptedStreamConfig{
+		OnDecryptionError: errorCallback,
+	})
 	if err != nil {
 		t.Fatalf("NewEncryptedStream for receiver failed: %v", err)
 	}
@@ -365,6 +367,110 @@ func TestEncryptedStream_DecryptionErrorCallback(t *testing.T) {
 	select {
 	case <-incoming:
 		t.Error("message should not have been delivered due to decryption failure")
+	default:
+		// Expected - no message
+	}
+}
+
+func TestEncryptedStream_OversizedMessageRejection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create crypto modules for both sides
+	priv1 := generateTestKey(t)
+	priv2 := generateTestKey(t)
+
+	mod1, _ := crypto.NewModule(priv1)
+	mod2, _ := crypto.NewModule(priv2)
+
+	// Derive shared keys
+	key1, _ := mod1.DeriveSharedKey(mod2.Ed25519PublicKey())
+	key2, _ := mod2.DeriveSharedKey(mod1.Ed25519PublicKey())
+
+	// Create pipes for bidirectional communication
+	r1, w1 := io.Pipe()
+	r2, w2 := io.Pipe()
+
+	stream1 := newMockStream(r2, w1)
+	stream2 := newMockStream(r1, w2)
+
+	peerID := mustParsePeerID(t, testPeerIDStr)
+	incoming := make(chan IncomingMessage, 10)
+
+	// Track oversized message callback
+	var callbackMu sync.Mutex
+	var oversizedCallbackInvoked bool
+	var oversizedSize int
+
+	oversizedCallback := func(pid peer.ID, streamName string, size int) {
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		oversizedCallbackInvoked = true
+		oversizedSize = size
+	}
+
+	// Sender has no size limit
+	sender, err := NewEncryptedStream(ctx, "test", peerID, stream1, key1, incoming, EncryptedStreamConfig{})
+	if err != nil {
+		t.Fatalf("NewEncryptedStream for sender failed: %v", err)
+	}
+	defer sender.Close()
+
+	// Receiver has a small max message size (100 bytes)
+	// Note: This is the ciphertext size, which includes nonce (12) + plaintext + tag (16)
+	receiver, err := NewEncryptedStream(ctx, "test", peerID, stream2, key2, incoming, EncryptedStreamConfig{
+		MaxMessageSize:     100,
+		OnOversizedMessage: oversizedCallback,
+	})
+	if err != nil {
+		t.Fatalf("NewEncryptedStream for receiver failed: %v", err)
+	}
+	defer receiver.Close()
+
+	// Send a small message first - should succeed
+	smallData := []byte("small message")
+	err = sender.Send(smallData)
+	if err != nil {
+		t.Fatalf("Send small message failed: %v", err)
+	}
+
+	// Wait for small message
+	select {
+	case msg := <-incoming:
+		if string(msg.Data) != string(smallData) {
+			t.Errorf("Small message data = %q, want %q", msg.Data, smallData)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout waiting for small message")
+	}
+
+	// Send an oversized message (150 bytes of plaintext will be ~178 bytes ciphertext)
+	largeData := make([]byte, 150)
+	for i := range largeData {
+		largeData[i] = byte(i)
+	}
+	err = sender.Send(largeData)
+	if err != nil {
+		t.Fatalf("Send large message failed: %v", err)
+	}
+
+	// Wait for oversized callback to be invoked
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify oversized callback was invoked
+	callbackMu.Lock()
+	if !oversizedCallbackInvoked {
+		t.Error("oversized message callback was not invoked")
+	}
+	if oversizedSize <= 100 {
+		t.Errorf("oversized size %d should be > 100", oversizedSize)
+	}
+	callbackMu.Unlock()
+
+	// Oversized message should NOT be delivered
+	select {
+	case <-incoming:
+		t.Error("oversized message should not have been delivered")
 	default:
 		// Expected - no message
 	}

@@ -387,6 +387,75 @@ func TestEncryptDecrypt_ConvenienceFunctions_InvalidKey(t *testing.T) {
 	}
 }
 
+func TestCipher_Close(t *testing.T) {
+	key := generateRandomKey(t)
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatalf("NewCipher failed: %v", err)
+	}
+
+	// Verify cipher works before close
+	plaintext := []byte("test message")
+	_, err = cipher.Encrypt(plaintext, nil)
+	if err != nil {
+		t.Fatalf("Encrypt before Close failed: %v", err)
+	}
+
+	// Check IsClosed before close
+	if cipher.IsClosed() {
+		t.Error("cipher should not be closed yet")
+	}
+
+	// Close should zero the key
+	cipher.Close()
+
+	// Verify IsClosed
+	if !cipher.IsClosed() {
+		t.Error("cipher should be closed")
+	}
+
+	// Verify key is zeroed
+	if cipher.key != nil {
+		t.Error("key should be nil after Close")
+	}
+
+	// Close should be idempotent
+	cipher.Close() // Should not panic
+}
+
+func TestCipher_Close_ZerosKey(t *testing.T) {
+	key := generateRandomKey(t)
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatalf("NewCipher failed: %v", err)
+	}
+
+	// Get a reference to the internal key before close
+	keyRef := cipher.key
+
+	// Verify key is non-zero
+	allZero := true
+	for _, b := range keyRef {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		t.Fatal("key should not be all zeros before Close")
+	}
+
+	// Close the cipher
+	cipher.Close()
+
+	// Verify the original slice is zeroed (defense in depth)
+	for i, b := range keyRef {
+		if b != 0 {
+			t.Errorf("key byte %d is not zero after Close: got %d", i, b)
+		}
+	}
+}
+
 func BenchmarkCipher_Encrypt(b *testing.B) {
 	key := make([]byte, KeySize)
 	rand.Read(key)

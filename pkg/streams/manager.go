@@ -39,6 +39,12 @@ type Manager struct {
 	// onDecryptionError is called when a decryption error occurs (optional)
 	onDecryptionError DecryptionErrorCallback
 
+	// onOversizedMessage is called when a message exceeds maxMessageSize (optional)
+	onOversizedMessage OversizedMessageCallback
+
+	// maxMessageSize is the maximum allowed message size for received messages
+	maxMessageSize int
+
 	mu sync.RWMutex
 
 	incoming chan IncomingMessage
@@ -74,6 +80,23 @@ func (m *Manager) SetDecryptionErrorCallback(callback DecryptionErrorCallback) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onDecryptionError = callback
+}
+
+// SetOversizedMessageCallback sets a callback function that is called when a received
+// message exceeds the maximum size. This is useful for logging and metrics.
+func (m *Manager) SetOversizedMessageCallback(callback OversizedMessageCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onOversizedMessage = callback
+}
+
+// SetMaxMessageSize sets the maximum allowed size for received messages.
+// Messages exceeding this size are dropped and the oversized callback is called.
+// Set to 0 to disable size checking.
+func (m *Manager) SetMaxMessageSize(size int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.maxMessageSize = size
 }
 
 // EstablishStreams registers the shared key and allowed stream names for a peer.
@@ -288,7 +311,7 @@ func (m *Manager) openStreamLazilyCtx(ctx context.Context, peerID peer.ID, strea
 		return nil, fmt.Errorf("failed to open stream %q: %w", streamName, err)
 	}
 
-	// Create encrypted stream with decryption error callback
+	// Create encrypted stream with config
 	encStream, err := NewEncryptedStream(
 		m.ctx,
 		streamName,
@@ -296,7 +319,11 @@ func (m *Manager) openStreamLazilyCtx(ctx context.Context, peerID peer.ID, strea
 		rawStream,
 		sharedKey,
 		m.incoming,
-		m.onDecryptionError,
+		EncryptedStreamConfig{
+			OnDecryptionError:  m.onDecryptionError,
+			OnOversizedMessage: m.onOversizedMessage,
+			MaxMessageSize:     m.maxMessageSize,
+		},
 	)
 	if err != nil {
 		rawStream.Close()
@@ -512,7 +539,11 @@ func (m *Manager) HandleIncomingStream(
 		stream,
 		sharedKey,
 		m.incoming,
-		m.onDecryptionError,
+		EncryptedStreamConfig{
+			OnDecryptionError:  m.onDecryptionError,
+			OnOversizedMessage: m.onOversizedMessage,
+			MaxMessageSize:     m.maxMessageSize,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create encrypted stream: %w", err)

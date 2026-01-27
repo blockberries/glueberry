@@ -2045,3 +2045,101 @@ Both race condition claims from the security review were **false positives**. Th
 **Status:** ✅ VERIFIED - No race conditions
 
 ---
+
+## Phase 0: Critical Bug Fixes (P0)
+
+### Phase 0.1: Fix SecureZero Compiler Optimization Issue
+
+**Status:** ✅ Completed
+**Priority:** P0 (Critical - Security)
+
+**Issue:** The `SecureZero` function used a direct loop that could theoretically be optimized away by the compiler as a dead store elimination.
+
+**Fix:** Changed implementation to use function variable indirection pattern, a technique used in security-conscious Go code to prevent compiler optimization:
+
+```go
+var memclrFunc = func(b []byte) {
+    for i := range b {
+        b[i] = 0
+    }
+}
+
+func SecureZero(b []byte) {
+    memclrFunc(b)
+}
+```
+
+**Files Modified:** `pkg/crypto/secure.go`
+
+---
+
+### Phase 0.2: Fix Flow Controller Multi-Waiter Deadlock
+
+**Status:** ✅ Completed
+**Priority:** P0 (Critical - Correctness)
+
+**Issue:** When multiple goroutines blocked waiting for flow control to unblock, only one would be woken up. The others would remain blocked forever (deadlock).
+
+**Root Cause:** Two issues:
+1. Waiters incremented `pending` before blocking, counting blocked waiters as pending work
+2. Used a buffered channel that only unblocked one waiter instead of broadcasting
+
+**Fix:**
+1. Changed to not increment `pending` until permission is actually granted
+2. Changed from buffered channel to close/recreate pattern that broadcasts to all waiters
+
+**Files Modified:** `internal/flow/controller.go`
+**Files Created:** `internal/flow/stress_test.go` (regression test)
+
+---
+
+### Phase 0.3: Add Receive-Path Message Size Validation
+
+**Status:** ✅ Completed
+**Priority:** P0 (Critical - Security)
+
+**Issue:** `MaxMessageSize` was only validated on the send path, not the receive path. A malicious peer could send oversized messages to exhaust memory.
+
+**Fix:** Added size validation in `EncryptedStream.readLoop()` before decryption with configurable callback:
+
+```go
+type OversizedMessageCallback func(peerID peer.ID, streamName string, size int)
+
+type EncryptedStreamConfig struct {
+    OnDecryptionError   DecryptionErrorCallback
+    OnOversizedMessage  OversizedMessageCallback
+    MaxMessageSize      int
+}
+```
+
+**Files Modified:**
+- `pkg/streams/encrypted.go` - Added config struct and size check in readLoop
+- `pkg/streams/manager.go` - Updated to pass config to streams
+- `pkg/streams/encrypted_test.go` - Added `TestEncryptedStream_OversizedMessageRejection`
+
+---
+
+## Phase 1: Security Hardening (P1)
+
+### Phase 1.1: Add Cipher.Close() for Key Material Zeroing
+
+**Status:** ✅ Completed
+**Priority:** P1 (Security)
+
+**Issue:** The `Cipher` struct didn't store a copy of the key, making it impossible to zero the key material when the cipher was no longer needed.
+
+**Fix:**
+1. Added `key []byte` field to store a copy of the key
+2. Added `closed bool` field to track closure state
+3. Added `Close()` method that zeros the key and nils the AEAD
+4. Added `IsClosed()` method to check closure state
+5. Updated `EncryptedStream.Close()` to call `cipher.Close()`
+
+**Note:** The underlying chacha20poly1305 library stores its own internal copy of the key which cannot be zeroed from outside the package. This is documented in the code comments. The `Close()` method zeros our copy for defense in depth.
+
+**Files Modified:**
+- `pkg/crypto/cipher.go` - Added key field, Close(), IsClosed()
+- `pkg/streams/encrypted.go` - Call cipher.Close() in stream Close()
+- `pkg/crypto/cipher_test.go` - Added TestCipher_Close and TestCipher_Close_ZerosKey
+
+---

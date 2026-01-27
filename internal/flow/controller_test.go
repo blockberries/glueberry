@@ -119,7 +119,7 @@ func TestController_UnblocksAtLowWatermark(t *testing.T) {
 	}
 
 	// Start a goroutine that will block on Acquire
-	// This will increment pending to 4 before blocking
+	// Note: blocked waiters do NOT increment pending
 	acquireDone := make(chan error, 1)
 	go func() {
 		acquireDone <- fc.Acquire(ctx)
@@ -129,10 +129,10 @@ func TestController_UnblocksAtLowWatermark(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Release until we hit low watermark
-	// The blocked Acquire incremented pending to 4
-	fc.Release() // 4 -> 3 (still blocked)
+	// Pending stays at 3 (blocked waiters don't increment)
 	fc.Release() // 3 -> 2 (still blocked)
 	fc.Release() // 2 -> 1 (now at low watermark, should unblock)
+	fc.Release() // 1 -> 0 (waiter got unblocked and incremented, this releases that)
 
 	select {
 	case err := <-acquireDone:
@@ -175,7 +175,7 @@ func TestController_ContextCancelled(t *testing.T) {
 		t.Error("Acquire should have been cancelled")
 	}
 
-	// Pending should be back to 3 (the cancelled acquire decrements)
+	// Pending should still be 3 (cancelled acquires never increment pending)
 	if fc.Pending() != 3 {
 		t.Errorf("expected pending 3, got %d", fc.Pending())
 	}

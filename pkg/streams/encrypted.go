@@ -21,6 +21,10 @@ type IncomingMessage struct {
 	Timestamp  time.Time
 }
 
+// OversizedMessageCallback is called when a received message exceeds the maximum size.
+// It receives the peer ID, stream name, and the actual size of the message.
+type OversizedMessageCallback func(peerID peer.ID, streamName string, size int)
+
 // EncryptedStream provides transparent encryption/decryption over a libp2p stream.
 // It uses ChaCha20-Poly1305 for authenticated encryption and Cramberry for message framing.
 //
@@ -37,19 +41,34 @@ type EncryptedStream struct {
 	writer  *cramberry.StreamWriter
 	writeMu sync.Mutex
 
-	incoming          chan<- IncomingMessage
-	onDecryptionError DecryptionErrorCallback
-	ctx               context.Context
-	cancel            context.CancelFunc
+	incoming           chan<- IncomingMessage
+	onDecryptionError  DecryptionErrorCallback
+	onOversizedMessage OversizedMessageCallback
+	maxMessageSize     int
+	ctx                context.Context
+	cancel             context.CancelFunc
 
 	closed   bool
 	closeMu  sync.Mutex
 	closeErr error
 }
 
+// EncryptedStreamConfig holds configuration options for creating an encrypted stream.
+type EncryptedStreamConfig struct {
+	// OnDecryptionError is called when decryption fails (optional)
+	OnDecryptionError DecryptionErrorCallback
+
+	// OnOversizedMessage is called when a message exceeds MaxMessageSize (optional)
+	OnOversizedMessage OversizedMessageCallback
+
+	// MaxMessageSize is the maximum allowed message size in bytes.
+	// Messages exceeding this size are dropped and OnOversizedMessage is called.
+	// If 0, no size limit is enforced.
+	MaxMessageSize int
+}
+
 // NewEncryptedStream creates a new encrypted stream.
 // It starts a read goroutine to handle incoming messages.
-// The optional onDecryptionError callback is called when decryption fails.
 func NewEncryptedStream(
 	ctx context.Context,
 	name string,
@@ -57,7 +76,7 @@ func NewEncryptedStream(
 	stream network.Stream,
 	sharedKey []byte,
 	incoming chan<- IncomingMessage,
-	onDecryptionError DecryptionErrorCallback,
+	config EncryptedStreamConfig,
 ) (*EncryptedStream, error) {
 	// Create cipher for this shared key
 	cipher, err := crypto.NewCipher(sharedKey)
@@ -68,17 +87,19 @@ func NewEncryptedStream(
 	streamCtx, cancel := context.WithCancel(ctx)
 
 	es := &EncryptedStream{
-		name:              name,
-		peerID:            peerID,
-		stream:            stream,
-		sharedKey:         sharedKey,
-		cipher:            cipher,
-		reader:            cramberry.NewMessageIterator(stream),
-		writer:            cramberry.NewStreamWriter(stream),
-		incoming:          incoming,
-		onDecryptionError: onDecryptionError,
-		ctx:               streamCtx,
-		cancel:            cancel,
+		name:               name,
+		peerID:             peerID,
+		stream:             stream,
+		sharedKey:          sharedKey,
+		cipher:             cipher,
+		reader:             cramberry.NewMessageIterator(stream),
+		writer:             cramberry.NewStreamWriter(stream),
+		incoming:           incoming,
+		onDecryptionError:  config.OnDecryptionError,
+		onOversizedMessage: config.OnOversizedMessage,
+		maxMessageSize:     config.MaxMessageSize,
+		ctx:                streamCtx,
+		cancel:             cancel,
 	}
 
 	// Start read goroutine
@@ -183,6 +204,17 @@ func (es *EncryptedStream) readLoop() {
 			return
 		}
 
+		// Check message size before decryption to prevent resource exhaustion.
+		// The encrypted message includes nonce (12 bytes) and auth tag (16 bytes),
+		// so the plaintext will be smaller. We check the ciphertext size for safety.
+		if es.maxMessageSize > 0 && len(encrypted) > es.maxMessageSize {
+			if es.onOversizedMessage != nil {
+				es.onOversizedMessage(es.peerID, es.name, len(encrypted))
+			}
+			// Drop oversized message and continue
+			continue
+		}
+
 		// Decrypt the message
 		decrypted, err := es.cipher.Decrypt(encrypted, nil)
 		if err != nil {
@@ -217,6 +249,7 @@ func (es *EncryptedStream) readLoop() {
 }
 
 // Close closes the encrypted stream and stops the read goroutine.
+// It also zeros the cipher's key material.
 func (es *EncryptedStream) Close() error {
 	es.closeMu.Lock()
 	if es.closed {
@@ -229,6 +262,11 @@ func (es *EncryptedStream) Close() error {
 	// Cancel context to stop read loop
 	es.cancel()
 
+	// Close the cipher to zero key material
+	if es.cipher != nil {
+		es.cipher.Close()
+	}
+
 	// Close the underlying stream
 	err := es.stream.Close()
 
@@ -237,10 +275,9 @@ func (es *EncryptedStream) Close() error {
 }
 
 // markClosed marks the stream as closed with the given error.
-// Note: The shared key is NOT zeroed here because:
-// 1. The key is owned by the Manager, which handles zeroing in CloseStreams/Shutdown
-// 2. Multiple streams may share the same key reference
-// 3. The cipher has its own internal copy of the key
+// Note: The shared key reference (es.sharedKey) is NOT zeroed here because
+// it's owned by the Manager, which handles zeroing in CloseStreams/Shutdown.
+// The cipher's internal key copy is zeroed in Close().
 func (es *EncryptedStream) markClosed(err error) {
 	es.closeMu.Lock()
 	defer es.closeMu.Unlock()

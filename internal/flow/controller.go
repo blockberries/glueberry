@@ -4,6 +4,7 @@ package flow
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // Default flow control values.
@@ -22,8 +23,11 @@ type Controller struct {
 	lowWatermark  int
 	pending       int
 	blocked       bool
-	unblockCh     chan struct{}
 	closed        bool
+
+	// unblockCh is closed when transitioning from blocked to unblocked.
+	// A new channel is created after each unblock event.
+	unblockCh chan struct{}
 
 	// Metrics callback (optional)
 	onBlocked func()
@@ -47,7 +51,7 @@ func NewController(high, low int) *Controller {
 	return &Controller{
 		highWatermark: high,
 		lowWatermark:  low,
-		unblockCh:     make(chan struct{}, 1),
+		unblockCh:     make(chan struct{}),
 	}
 }
 
@@ -64,44 +68,43 @@ func (fc *Controller) SetBlockedCallback(fn func()) {
 // until the pending count drops to the low watermark or the context is cancelled.
 // Returns nil on success, or context.Canceled/context.DeadlineExceeded on failure.
 func (fc *Controller) Acquire(ctx context.Context) error {
-	fc.mu.Lock()
-	if fc.closed {
-		fc.mu.Unlock()
-		return context.Canceled
-	}
-
-	// Check if already blocked before incrementing pending.
-	// If blocked, we need to wait before we can proceed.
-	wasBlocked := fc.blocked
-
-	fc.pending++
-
-	// Check if we just hit the high watermark and need to start blocking future calls
-	if fc.pending >= fc.highWatermark && !fc.blocked {
-		fc.blocked = true
-		if fc.onBlocked != nil {
-			fc.onBlocked()
-		}
-	}
-
-	// If we weren't blocked when we entered, we can proceed
-	if !wasBlocked {
-		fc.mu.Unlock()
-		return nil
-	}
-
-	// We were already blocked - need to wait for unblock signal
-	fc.mu.Unlock()
-
-	select {
-	case <-ctx.Done():
-		// Context cancelled - decrement pending since we didn't complete
+	for {
 		fc.mu.Lock()
-		fc.pending--
+
+		if fc.closed {
+			fc.mu.Unlock()
+			return context.Canceled
+		}
+
+		// If not blocked, we can proceed immediately
+		if !fc.blocked {
+			fc.pending++
+
+			// Check if we just hit the high watermark
+			if fc.pending >= fc.highWatermark && !fc.blocked {
+				fc.blocked = true
+				if fc.onBlocked != nil {
+					fc.onBlocked()
+				}
+			}
+
+			fc.mu.Unlock()
+			return nil
+		}
+
+		// We're blocked - get the current unblock channel
+		// Note: we do NOT increment pending while waiting
+		waitCh := fc.unblockCh
 		fc.mu.Unlock()
-		return ctx.Err()
-	case <-fc.unblockCh:
-		return nil
+
+		// Wait for either context cancellation or unblock signal
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-waitCh:
+			// Channel was closed (unblock broadcast) - loop and retry
+			continue
+		}
 	}
 }
 
@@ -118,11 +121,10 @@ func (fc *Controller) Release() {
 	// Check if we should unblock
 	if fc.blocked && fc.pending <= fc.lowWatermark {
 		fc.blocked = false
-		// Non-blocking send to unblock one waiter
-		select {
-		case fc.unblockCh <- struct{}{}:
-		default:
-		}
+		// Broadcast to ALL waiters by closing the channel
+		close(fc.unblockCh)
+		// Create a new channel for the next blocking cycle
+		fc.unblockCh = make(chan struct{})
 	}
 }
 
@@ -150,6 +152,25 @@ func (fc *Controller) Close() {
 	}
 	fc.closed = true
 
-	// Unblock any waiting senders
+	// Unblock any waiting senders by closing the channel
 	close(fc.unblockCh)
+}
+
+// WaitWithTimeout is a helper for tests that need to wait with a timeout.
+// It's not part of the normal flow control API.
+func (fc *Controller) WaitWithTimeout(timeout time.Duration) bool {
+	fc.mu.Lock()
+	if !fc.blocked {
+		fc.mu.Unlock()
+		return true
+	}
+	waitCh := fc.unblockCh
+	fc.mu.Unlock()
+
+	select {
+	case <-waitCh:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }

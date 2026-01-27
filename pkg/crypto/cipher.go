@@ -20,8 +20,15 @@ const (
 
 // Cipher provides ChaCha20-Poly1305 authenticated encryption.
 // It is safe for concurrent use.
+//
+// Call Close() when done to zero key material. Note that the underlying
+// chacha20poly1305 library also stores a copy of the key internally which
+// cannot be zeroed from outside the package. The Close() method zeros our
+// copy for defense in depth.
 type Cipher struct {
-	aead cipher
+	aead   cipher
+	key    []byte // Our copy for zeroing on Close
+	closed bool
 }
 
 // cipher is an interface matching chacha20poly1305.AEAD for testing
@@ -34,6 +41,7 @@ type cipher interface {
 
 // NewCipher creates a new ChaCha20-Poly1305 cipher with the given key.
 // The key must be exactly 32 bytes.
+// Call Close() when done to zero key material.
 func NewCipher(key []byte) (*Cipher, error) {
 	if len(key) != KeySize {
 		return nil, fmt.Errorf("invalid key size: expected %d bytes, got %d", KeySize, len(key))
@@ -44,7 +52,11 @@ func NewCipher(key []byte) (*Cipher, error) {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	return &Cipher{aead: aead}, nil
+	// Store a copy of the key for zeroing on Close
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
+
+	return &Cipher{aead: aead, key: keyCopy}, nil
 }
 
 // Encrypt encrypts the plaintext using ChaCha20-Poly1305.
@@ -108,6 +120,27 @@ func (c *Cipher) Decrypt(data, additionalData []byte) ([]byte, error) {
 	}
 
 	return plaintext, nil
+}
+
+// Close zeros the key material stored in this cipher.
+// After Close is called, the cipher should not be used.
+//
+// Note: The underlying chacha20poly1305 library also stores a copy of the key
+// internally which cannot be zeroed from outside the package. This method
+// zeros our copy for defense in depth.
+func (c *Cipher) Close() {
+	if c.closed {
+		return
+	}
+	c.closed = true
+	SecureZero(c.key)
+	c.key = nil
+	c.aead = nil
+}
+
+// IsClosed returns true if the cipher has been closed.
+func (c *Cipher) IsClosed() bool {
+	return c.closed
 }
 
 // Encrypt is a convenience function that encrypts plaintext with the given key.
