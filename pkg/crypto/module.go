@@ -129,6 +129,24 @@ func (m *Module) RemovePeerKey(remoteX25519 []byte) {
 	m.peerKeysMu.Unlock()
 }
 
+// RemovePeerKeyByEd25519 removes a cached shared key for a peer using their Ed25519 public key.
+// This is a convenience method that converts the Ed25519 key to X25519 and removes the cached key.
+// If the public key is nil or invalid, this is a no-op.
+func (m *Module) RemovePeerKeyByEd25519(remotePubKey []byte) {
+	if len(remotePubKey) == 0 {
+		return
+	}
+
+	// Convert Ed25519 public key to X25519
+	remoteX25519, err := Ed25519PublicToX25519(remotePubKey)
+	if err != nil {
+		// Invalid key - nothing to remove
+		return
+	}
+
+	m.RemovePeerKey(remoteX25519)
+}
+
 // ClearPeerKeys removes all cached shared keys.
 // All keys are securely zeroed before being removed from the cache.
 func (m *Module) ClearPeerKeys() {

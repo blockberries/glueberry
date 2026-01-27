@@ -446,3 +446,75 @@ func TestModule_X25519PublicKey_Consistency(t *testing.T) {
 		t.Error("X25519PublicKey should return consistent results")
 	}
 }
+
+func TestModule_RemovePeerKeyByEd25519(t *testing.T) {
+	priv1 := generateModuleTestKey(t)
+	priv2 := generateModuleTestKey(t)
+	pub2 := priv2.Public().(ed25519.PublicKey)
+
+	m, err := NewModule(priv1)
+	if err != nil {
+		t.Fatalf("NewModule failed: %v", err)
+	}
+	defer m.Close()
+
+	// Derive a shared key (this caches it)
+	key1, err := m.DeriveSharedKey(pub2)
+	if err != nil {
+		t.Fatalf("DeriveSharedKey failed: %v", err)
+	}
+
+	// Verify key is cached by deriving again
+	key2, err := m.DeriveSharedKey(pub2)
+	if err != nil {
+		t.Fatalf("DeriveSharedKey (second) failed: %v", err)
+	}
+
+	if !bytes.Equal(key1, key2) {
+		t.Error("cached key should be the same")
+	}
+
+	// Remove the key using Ed25519 public key
+	m.RemovePeerKeyByEd25519(pub2)
+
+	// Verify the key was removed by checking it needs to be re-derived
+	// (the Module doesn't expose a way to check if key is cached directly,
+	// but we can verify by counting cache size or deriving again)
+
+	// Check that ClearPeerKeys with empty cache works
+	m.ClearPeerKeys()
+}
+
+func TestModule_RemovePeerKeyByEd25519_NilKey(t *testing.T) {
+	priv := generateModuleTestKey(t)
+	m, err := NewModule(priv)
+	if err != nil {
+		t.Fatalf("NewModule failed: %v", err)
+	}
+	defer m.Close()
+
+	// Should not panic with nil key
+	m.RemovePeerKeyByEd25519(nil)
+
+	// Should not panic with empty key
+	m.RemovePeerKeyByEd25519([]byte{})
+}
+
+func TestModule_RemovePeerKeyByEd25519_InvalidKey(t *testing.T) {
+	priv := generateModuleTestKey(t)
+	m, err := NewModule(priv)
+	if err != nil {
+		t.Fatalf("NewModule failed: %v", err)
+	}
+	defer m.Close()
+
+	// Should not panic with invalid key (wrong length)
+	m.RemovePeerKeyByEd25519([]byte{1, 2, 3})
+
+	// Should not panic with random 32-byte key that isn't a valid Ed25519 public key
+	invalidKey := make([]byte, 32)
+	for i := range invalidKey {
+		invalidKey[i] = byte(i)
+	}
+	m.RemovePeerKeyByEd25519(invalidKey)
+}

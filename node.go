@@ -454,8 +454,29 @@ func (n *Node) Disconnect(peerID peer.ID) error {
 
 // DisconnectCtx closes the connection to a peer with context support for cancellation.
 // The provided context can be used to cancel the operation if it takes too long.
+// This method also cleans up streams and removes the peer's cached encryption key.
 func (n *Node) DisconnectCtx(ctx context.Context, peerID peer.ID) error {
+	// Clean up peer resources (streams, cached keys)
+	n.cleanupPeerResources(peerID)
+
 	return n.connections.DisconnectCtx(ctx, peerID)
+}
+
+// cleanupPeerResources cleans up resources associated with a disconnected peer.
+// This includes closing streams and removing cached encryption keys.
+// This is safe to call multiple times for the same peer.
+func (n *Node) cleanupPeerResources(peerID peer.ID) {
+	// Close streams for this peer (zeros shared key in stream manager)
+	if n.streamManager != nil {
+		_ = n.streamManager.CloseStreams(peerID)
+	}
+
+	// Remove cached shared key from crypto module
+	if n.addressBook != nil && n.crypto != nil {
+		if entry, err := n.addressBook.GetPeer(peerID); err == nil && entry != nil {
+			n.crypto.RemovePeerKeyByEd25519(entry.PublicKey)
+		}
+	}
 }
 
 // PrepareStreams prepares encrypted streams for communication with a peer.
@@ -952,6 +973,13 @@ func (n *Node) forwardEvents() {
 		case evt, ok := <-n.internalEvents:
 			if !ok {
 				return
+			}
+
+			// Handle disconnect cleanup - remove cached keys for disconnected peers
+			// This handles both expected disconnects (via DisconnectCtx which already cleans up)
+			// and unexpected disconnects (peer going offline, network failures, etc.)
+			if ConnectionState(evt.State) == StateDisconnected {
+				n.cleanupPeerResources(evt.PeerID)
 			}
 
 			// Convert to public event type
