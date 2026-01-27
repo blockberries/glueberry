@@ -33,6 +33,8 @@ const (
 	DefaultMaxMessageSize          = 1 << 20 // 1MB max message size
 	DefaultConnMgrLowWatermark     = 100     // Connection manager low watermark
 	DefaultConnMgrHighWatermark    = 400     // Connection manager high watermark
+	DefaultMaxStreamNameLength     = 64      // Maximum stream name length in characters
+	DefaultMaxMetadataSize         = 4096    // 4KB max metadata size per peer
 )
 
 // Config holds the configuration for a Glueberry node.
@@ -120,6 +122,16 @@ type Config struct {
 	// This can be used to detect tampering, log security events, or ban peers.
 	// If nil, decryption errors are only logged and counted via Metrics.
 	OnDecryptionError DecryptionErrorCallback
+
+	// MaxStreamNameLength is the maximum allowed length for stream names.
+	// Stream names exceeding this length will be rejected.
+	// Set to 0 to use DefaultMaxStreamNameLength (64).
+	MaxStreamNameLength int
+
+	// MaxMetadataSize is the maximum total size in bytes for peer metadata.
+	// Metadata entries with combined key+value sizes exceeding this will be rejected.
+	// Set to 0 to use DefaultMaxMetadataSize (4KB).
+	MaxMetadataSize int
 }
 
 // Validate checks that the configuration is valid and returns an error
@@ -183,6 +195,12 @@ func (c *Config) Validate() error {
 	if c.ConnMgrLowWatermark > 0 && c.ConnMgrHighWatermark > 0 && c.ConnMgrLowWatermark >= c.ConnMgrHighWatermark {
 		return fmt.Errorf("%w: connection manager low watermark must be less than high watermark", ErrInvalidConfig)
 	}
+	if c.MaxStreamNameLength < 0 {
+		return fmt.Errorf("%w: max stream name length cannot be negative", ErrInvalidConfig)
+	}
+	if c.MaxMetadataSize < 0 {
+		return fmt.Errorf("%w: max metadata size cannot be negative", ErrInvalidConfig)
+	}
 	return nil
 }
 
@@ -229,6 +247,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.ConnMgrHighWatermark == 0 {
 		c.ConnMgrHighWatermark = DefaultConnMgrHighWatermark
+	}
+	if c.MaxStreamNameLength == 0 {
+		c.MaxStreamNameLength = DefaultMaxStreamNameLength
+	}
+	if c.MaxMetadataSize == 0 {
+		c.MaxMetadataSize = DefaultMaxMetadataSize
 	}
 }
 
@@ -372,6 +396,24 @@ func WithConnMgrHighWatermark(n int) ConfigOption {
 func WithDecryptionErrorCallback(cb DecryptionErrorCallback) ConfigOption {
 	return func(c *Config) {
 		c.OnDecryptionError = cb
+	}
+}
+
+// WithMaxStreamNameLength sets the maximum allowed length for stream names.
+// Stream names exceeding this length will be rejected with ErrStreamNameTooLong.
+// Default is 64 characters.
+func WithMaxStreamNameLength(n int) ConfigOption {
+	return func(c *Config) {
+		c.MaxStreamNameLength = n
+	}
+}
+
+// WithMaxMetadataSize sets the maximum total size in bytes for peer metadata.
+// Metadata entries with combined key+value sizes exceeding this will be rejected
+// with ErrMetadataTooLarge. Default is 4KB.
+func WithMaxMetadataSize(n int) ConfigOption {
+	return func(c *Config) {
+		c.MaxMetadataSize = n
 	}
 }
 

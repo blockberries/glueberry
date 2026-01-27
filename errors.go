@@ -377,3 +377,15 @@ var (
 	// ErrNodeStopped indicates the node has been stopped.
 	ErrNodeStopped = errors.New("node stopped")
 )
+
+// Sentinel errors for input validation.
+var (
+	// ErrInvalidStreamName indicates the stream name is invalid.
+	ErrInvalidStreamName = errors.New("invalid stream name")
+
+	// ErrStreamNameTooLong indicates the stream name exceeds the maximum length.
+	ErrStreamNameTooLong = errors.New("stream name too long")
+
+	// ErrMetadataTooLarge indicates the peer metadata exceeds the maximum size.
+	ErrMetadataTooLarge = errors.New("metadata too large")
+)

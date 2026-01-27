@@ -2672,3 +2672,80 @@ messageCount := node.MessagesSent(peerID)
 - Nil callback is safe - no panic, just skips notification
 
 ---
+
+### Phase 4.1.3: Enhanced Input Validation
+
+**Status:** ✅ Completed
+**Priority:** P2 (Security)
+
+**Issue:** The library accepted arbitrary stream names and metadata without validation, potentially allowing injection attacks, memory exhaustion from oversized metadata, or confusing error messages from invalid characters.
+
+**Solution:** Implemented comprehensive input validation:
+
+1. **Stream Name Validation**:
+   - Must be non-empty
+   - Only allows alphanumeric characters, hyphens, and underscores
+   - Enforces maximum length (default 64 characters)
+   - Validation in `PrepareStreams()`, `EstablishEncryptedStreams()`, and `SendCtx()`
+
+2. **Metadata Size Validation**:
+   - Limits total metadata size (sum of key+value lengths)
+   - Default maximum of 4KB
+   - Validation in `AddPeer()`
+
+3. **Configuration Options**:
+   - Added `MaxStreamNameLength` config (default 64)
+   - Added `MaxMetadataSize` config (default 4096 bytes)
+   - Added `WithMaxStreamNameLength()` and `WithMaxMetadataSize()` options
+
+4. **New Error Types**:
+   - `ErrInvalidStreamName` - invalid characters in stream name
+   - `ErrStreamNameTooLong` - exceeds max length
+   - `ErrMetadataTooLarge` - metadata exceeds size limit
+
+**Note:** Public key validation was already implemented in `pkg/crypto/keys.go` via `ValidateEd25519PublicKey()` which validates both size and curve point validity.
+
+**Files Created:**
+- `validation.go`: `ValidateStreamName()`, `ValidateStreamNames()`, `ValidateMetadataSize()`, `isValidStreamNameChar()`
+- `validation_test.go`: Comprehensive tests for all validation functions
+
+**Files Modified:**
+- `errors.go`:
+  - Added `ErrInvalidStreamName`, `ErrStreamNameTooLong`, `ErrMetadataTooLarge`
+
+- `config.go`:
+  - Added `DefaultMaxStreamNameLength` (64) and `DefaultMaxMetadataSize` (4096)
+  - Added `MaxStreamNameLength` and `MaxMetadataSize` fields to Config
+  - Added validation and default application for new fields
+  - Added `WithMaxStreamNameLength()` and `WithMaxMetadataSize()` options
+
+- `node.go`:
+  - Added stream name validation in `PrepareStreams()`
+  - Added stream name validation in `EstablishEncryptedStreams()`
+  - Added stream name validation in `SendCtx()`
+  - Added metadata size validation in `AddPeer()`
+
+- `config_test.go`:
+  - Added tests for new validation options
+  - Added tests for defaults
+
+**Example Usage:**
+```go
+// Invalid stream name rejected
+err := node.Send(peerID, "my stream", data) // Error: invalid character ' '
+
+// Stream name too long rejected
+err := node.Send(peerID, "very-long-name-exceeding-max", data) // Error: exceeds maximum
+
+// Metadata too large rejected
+largeMetadata := map[string]string{"key": strings.Repeat("x", 5000)}
+err := node.AddPeer(peerID, addrs, largeMetadata) // Error: metadata too large
+
+// Custom limits via config
+cfg := glueberry.NewConfig(key, path, addrs,
+    glueberry.WithMaxStreamNameLength(128),
+    glueberry.WithMaxMetadataSize(8192),
+)
+```
+
+---

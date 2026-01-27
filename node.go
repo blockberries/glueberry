@@ -346,6 +346,11 @@ func (n *Node) Version() ProtocolVersion {
 // AddPeer adds a peer to the address book.
 // If the node is started, it will automatically attempt to connect to the peer.
 func (n *Node) AddPeer(peerID peer.ID, addrs []multiaddr.Multiaddr, metadata map[string]string) error {
+	// Validate metadata size
+	if err := ValidateMetadataSize(metadata, n.config.MaxMetadataSize); err != nil {
+		return err
+	}
+
 	if err := n.addressBook.AddPeer(peerID, addrs, metadata); err != nil {
 		return err
 	}
@@ -467,8 +472,9 @@ func (n *Node) PrepareStreams(
 	}
 	n.startMu.Unlock()
 
-	if len(streamNames) == 0 {
-		return ErrNoStreamsRequested
+	// Validate stream names
+	if err := ValidateStreamNames(streamNames, n.config.MaxStreamNameLength); err != nil {
+		return err
 	}
 
 	n.logger.Debug("preparing streams", "peer_id", peerID.String(), "streams", streamNames)
@@ -588,8 +594,9 @@ func (n *Node) EstablishEncryptedStreams(
 	}
 	n.startMu.Unlock()
 
-	if len(streamNames) == 0 {
-		return ErrNoStreamsRequested
+	// Validate stream names
+	if err := ValidateStreamNames(streamNames, n.config.MaxStreamNameLength); err != nil {
+		return err
 	}
 
 	// Check if this is an incoming connection (peer is in Disconnected or unknown state)
@@ -662,6 +669,11 @@ func (n *Node) SendCtx(ctx context.Context, peerID peer.ID, streamName string, d
 		return ErrNodeNotStarted
 	}
 	n.startMu.Unlock()
+
+	// Validate stream name
+	if err := ValidateStreamName(streamName, n.config.MaxStreamNameLength); err != nil {
+		return err
+	}
 
 	// Check max message size
 	if n.config.MaxMessageSize > 0 && len(data) > n.config.MaxMessageSize {

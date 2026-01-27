@@ -208,6 +208,36 @@ func TestConfig_Validate_OptionalFields(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name:    "negative max stream name length",
+			modify:  func(c *Config) { c.MaxStreamNameLength = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "zero max stream name length is valid (uses default)",
+			modify:  func(c *Config) { c.MaxStreamNameLength = 0 },
+			wantErr: false,
+		},
+		{
+			name:    "positive max stream name length is valid",
+			modify:  func(c *Config) { c.MaxStreamNameLength = 128 },
+			wantErr: false,
+		},
+		{
+			name:    "negative max metadata size",
+			modify:  func(c *Config) { c.MaxMetadataSize = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "zero max metadata size is valid (uses default)",
+			modify:  func(c *Config) { c.MaxMetadataSize = 0 },
+			wantErr: false,
+		},
+		{
+			name:    "positive max metadata size is valid",
+			modify:  func(c *Config) { c.MaxMetadataSize = 8192 },
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -263,6 +293,12 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	}
 	if cfg.ConnMgrHighWatermark != DefaultConnMgrHighWatermark {
 		t.Errorf("ConnMgrHighWatermark = %v, want %v", cfg.ConnMgrHighWatermark, DefaultConnMgrHighWatermark)
+	}
+	if cfg.MaxStreamNameLength != DefaultMaxStreamNameLength {
+		t.Errorf("MaxStreamNameLength = %v, want %v", cfg.MaxStreamNameLength, DefaultMaxStreamNameLength)
+	}
+	if cfg.MaxMetadataSize != DefaultMaxMetadataSize {
+		t.Errorf("MaxMetadataSize = %v, want %v", cfg.MaxMetadataSize, DefaultMaxMetadataSize)
 	}
 }
 
@@ -440,6 +476,16 @@ func TestConfigOptions_Individual(t *testing.T) {
 			name:   "WithDecryptionErrorCallback",
 			option: WithDecryptionErrorCallback(func(peerID peer.ID, err error) {}),
 			check:  func(c *Config) bool { return c.OnDecryptionError != nil },
+		},
+		{
+			name:   "WithMaxStreamNameLength",
+			option: WithMaxStreamNameLength(128),
+			check:  func(c *Config) bool { return c.MaxStreamNameLength == 128 },
+		},
+		{
+			name:   "WithMaxMetadataSize",
+			option: WithMaxMetadataSize(8192),
+			check:  func(c *Config) bool { return c.MaxMetadataSize == 8192 },
 		},
 	}
 
