@@ -11,7 +11,7 @@ const (
 
 	// ProtocolVersionMinor is the minor protocol version.
 	// New features increment this.
-	ProtocolVersionMinor = 0
+	ProtocolVersionMinor = 2
 
 	// ProtocolVersionPatch is the patch protocol version.
 	// Bug fixes increment this.

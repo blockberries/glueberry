@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-01-27
+
+### Added
+
+#### Observability
+- **Prometheus Metrics Adapter** (`prometheus/` subpackage): Complete implementation of the Metrics interface with standard Prometheus naming conventions, histograms, counters, and gauges
+- **Grafana Dashboard Template** (`prometheus/grafana-dashboard.json`): Ready-to-import dashboard with connection, message, and flow control panels
+- **OpenTelemetry Tracing** (`otel/` subpackage): Distributed tracing support with span hierarchy for all major operations (connect, handshake, send, receive, encrypt, decrypt)
+- **Health Check API**: `IsHealthy()` for liveness probes, `ReadinessChecks()` for detailed health status, `HealthHandler()` and `LivenessHandler()` HTTP handlers for Kubernetes integration
+
+#### Security
+- **Decryption Error Callback**: `WithDecryptionErrorCallback()` config option for custom handling of decryption failures (e.g., peer banning)
+- **Nonce Exhaustion Warning**: Automatic warning when message count approaches collision risk threshold (2^40 messages)
+- **Enhanced Input Validation**: Stream name validation (alphanumeric, hyphens, underscores), metadata size limits, configurable via `WithMaxStreamNameLength()` and `WithMaxMetadataSize()`
+- **Connection Rate Limiting**: Configurable connection manager watermarks via `WithConnMgrLowWatermark()` and `WithConnMgrHighWatermark()`
+
+#### API Improvements
+- **Event Unsubscription**: `EventSubscription` type with `Unsubscribe()` method for proper cleanup of event listeners
+- **Debug Utilities**: `DumpState()`, `DumpStateJSON()`, `DumpStateString()` for node state inspection
+- **Error Hints**: All errors now include troubleshooting hints via `Hint` field
+
+#### Testing Infrastructure
+- **Chaos Engineering Tests**: 11 chaos tests covering connection drops, rapid connect/disconnect, concurrent operations, event overflow, simultaneous shutdown, network partition simulation
+- **Load Testing**: Benchmarks for node operations, peer management at scale (10-1000 peers), concurrent throughput measurement
+- **Flow Controller Stress Tests**: 100+ goroutine concurrent access verification
+
+#### Platform Support
+- **Windows File Locking**: Address book now supports Windows via `LockFileEx`/`UnlockFileEx`
+
+### Changed
+- **Address Book Persistence**: Non-critical updates (LastSeen) are now batched and flushed periodically (5s) for improved performance
+- **Stream Manager Locking**: Network I/O no longer blocks other stream operations (lock released during `NewStream()` calls)
+- **Message Drop Visibility**: All message drops now tracked via metrics and optional logging
+
+### Fixed
+- **SecureZero Optimization**: Fixed potential compiler optimization of key zeroing using function variable indirection
+- **Flow Controller Deadlock**: Fixed multi-waiter deadlock where only one goroutine would unblock (now uses broadcast pattern)
+- **Receive-Path Size Validation**: Added `MaxMessageSize` enforcement on receive path to prevent OOM from malicious peers
+- **Cipher Key Zeroing**: Added `Close()` method to Cipher for proper key material cleanup
+- **EncryptWithNonce Exposure**: Made nonce-setting API internal-only to prevent accidental nonce reuse
+- **Handshake Timeout Race**: Fixed race condition between timeout firing and handshake completion using atomic state transition
+- **EstablishEncryptedStreams**: Removed premature `MarkEstablished()` call that violated two-phase handshake design
+- **Peer Stats Memory Leak**: Added periodic cleanup of stale peer stats (24h inactivity threshold)
+
+### Security
+- All critical security issues from security audit addressed
+- Receive-side message size validation prevents memory exhaustion attacks
+- Key material properly zeroed in all code paths
+- Nonce reuse prevention via internal-only API
+
 ## [1.0.1] - 2026-01-26
 
 ### Changed
@@ -89,6 +139,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Glueberry Version | Protocol Version | Cramberry Version | Go Version |
 |-------------------|------------------|-------------------|------------|
+| 1.2.0             | 1.2.0            | 1.2.0             | 1.21+      |
 | 1.0.1             | 1.0.0            | 1.2.0             | 1.21+      |
 | 1.0.0             | 1.0.0            | 1.2.0             | 1.21+      |
 
