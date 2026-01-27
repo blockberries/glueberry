@@ -106,8 +106,8 @@ func New(cfg *Config) (*Node, error) {
 		PrivateKey:       cfg.PrivateKey,
 		ListenAddrs:      cfg.ListenAddrs,
 		Gater:            gater,
-		ConnMgrLowWater:  100,
-		ConnMgrHighWater: 400,
+		ConnMgrLowWater:  cfg.ConnMgrLowWatermark,
+		ConnMgrHighWater: cfg.ConnMgrHighWatermark,
 	}
 
 	libp2pHost, err := protocol.NewHost(ctx, hostConfig)

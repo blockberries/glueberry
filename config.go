@@ -20,6 +20,8 @@ const (
 	DefaultHighWatermark           = 1000    // Messages per stream before backpressure
 	DefaultLowWatermark            = 100     // Messages per stream to resume sending
 	DefaultMaxMessageSize          = 1 << 20 // 1MB max message size
+	DefaultConnMgrLowWatermark     = 100     // Connection manager low watermark
+	DefaultConnMgrHighWatermark    = 400     // Connection manager high watermark
 )
 
 // Config holds the configuration for a Glueberry node.
@@ -90,6 +92,18 @@ type Config struct {
 	// When false (default), sends will block when the high watermark is reached.
 	// When true, backpressure is disabled and messages may be dropped if buffers are full.
 	DisableBackpressure bool
+
+	// ConnMgrLowWatermark is the low watermark for the libp2p connection manager.
+	// The connection manager will start pruning connections when the number of
+	// connections exceeds ConnMgrHighWatermark, down to this level.
+	// Set to 0 to use DefaultConnMgrLowWatermark (100).
+	ConnMgrLowWatermark int
+
+	// ConnMgrHighWatermark is the high watermark for the libp2p connection manager.
+	// When the number of connections exceeds this, the connection manager will
+	// prune connections down to ConnMgrLowWatermark.
+	// Set to 0 to use DefaultConnMgrHighWatermark (400).
+	ConnMgrHighWatermark int
 }
 
 // Validate checks that the configuration is valid and returns an error
@@ -144,6 +158,15 @@ func (c *Config) Validate() error {
 	if c.MaxMessageSize < 0 {
 		return fmt.Errorf("%w: max message size cannot be negative", ErrInvalidConfig)
 	}
+	if c.ConnMgrLowWatermark < 0 {
+		return fmt.Errorf("%w: connection manager low watermark cannot be negative", ErrInvalidConfig)
+	}
+	if c.ConnMgrHighWatermark < 0 {
+		return fmt.Errorf("%w: connection manager high watermark cannot be negative", ErrInvalidConfig)
+	}
+	if c.ConnMgrLowWatermark > 0 && c.ConnMgrHighWatermark > 0 && c.ConnMgrLowWatermark >= c.ConnMgrHighWatermark {
+		return fmt.Errorf("%w: connection manager low watermark must be less than high watermark", ErrInvalidConfig)
+	}
 	return nil
 }
 
@@ -184,6 +207,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MaxMessageSize == 0 {
 		c.MaxMessageSize = DefaultMaxMessageSize
+	}
+	if c.ConnMgrLowWatermark == 0 {
+		c.ConnMgrLowWatermark = DefaultConnMgrLowWatermark
+	}
+	if c.ConnMgrHighWatermark == 0 {
+		c.ConnMgrHighWatermark = DefaultConnMgrHighWatermark
 	}
 }
 
@@ -284,6 +313,24 @@ func WithMaxMessageSize(n int) ConfigOption {
 func WithBackpressureDisabled() ConfigOption {
 	return func(c *Config) {
 		c.DisableBackpressure = true
+	}
+}
+
+// WithConnMgrLowWatermark sets the connection manager low watermark.
+// The connection manager will prune connections down to this level when
+// the high watermark is exceeded.
+func WithConnMgrLowWatermark(n int) ConfigOption {
+	return func(c *Config) {
+		c.ConnMgrLowWatermark = n
+	}
+}
+
+// WithConnMgrHighWatermark sets the connection manager high watermark.
+// When the number of connections exceeds this value, the connection manager
+// will start pruning connections down to the low watermark.
+func WithConnMgrHighWatermark(n int) ConfigOption {
+	return func(c *Config) {
+		c.ConnMgrHighWatermark = n
 	}
 }
 

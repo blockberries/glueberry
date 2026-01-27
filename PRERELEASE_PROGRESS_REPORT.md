@@ -2215,3 +2215,25 @@ The fix uses double-checked locking pattern with proper race handling - if two g
 - `pkg/streams/manager.go` - Restructured `openUnencryptedStreamLazilyCtx` and `openStreamLazilyCtx` to release lock before network I/O
 
 ---
+
+### Phase 1.5: Connection Rate Limiting
+
+**Status:** ✅ Completed
+**Priority:** P1 (Security/Resource Management)
+
+**Issue:** No configurable connection limits were exposed to applications. The hardcoded libp2p connection manager watermarks (100/400) couldn't be adjusted.
+
+**Fix:** Added configurable connection manager watermarks:
+- `ConnMgrLowWatermark` - Low watermark for connection manager pruning (default: 100)
+- `ConnMgrHighWatermark` - High watermark that triggers pruning (default: 400)
+- Added corresponding `WithConnMgrLowWatermark()` and `WithConnMgrHighWatermark()` config options
+- Wired config values to libp2p host creation
+
+**Note:** The libp2p connection manager automatically prunes connections when the high watermark is exceeded, down to the low watermark. This provides effective peer limiting.
+
+**Files Modified:**
+- `config.go` - Added `ConnMgrLowWatermark` and `ConnMgrHighWatermark` fields, validation, defaults, and config options
+- `config_test.go` - Added validation, default, and config option tests
+- `node.go` - Wired config values to host creation
+
+---

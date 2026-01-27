@@ -181,6 +181,32 @@ func TestConfig_Validate_OptionalFields(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name:    "negative conn mgr low watermark",
+			modify:  func(c *Config) { c.ConnMgrLowWatermark = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "negative conn mgr high watermark",
+			modify:  func(c *Config) { c.ConnMgrHighWatermark = -1 },
+			wantErr: true,
+		},
+		{
+			name: "conn mgr low watermark greater than high watermark",
+			modify: func(c *Config) {
+				c.ConnMgrLowWatermark = 500
+				c.ConnMgrHighWatermark = 100
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid conn mgr watermarks",
+			modify: func(c *Config) {
+				c.ConnMgrLowWatermark = 50
+				c.ConnMgrHighWatermark = 200
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -230,6 +256,12 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	}
 	if cfg.MessageBufferSize != DefaultMessageBufferSize {
 		t.Errorf("MessageBufferSize = %v, want %v", cfg.MessageBufferSize, DefaultMessageBufferSize)
+	}
+	if cfg.ConnMgrLowWatermark != DefaultConnMgrLowWatermark {
+		t.Errorf("ConnMgrLowWatermark = %v, want %v", cfg.ConnMgrLowWatermark, DefaultConnMgrLowWatermark)
+	}
+	if cfg.ConnMgrHighWatermark != DefaultConnMgrHighWatermark {
+		t.Errorf("ConnMgrHighWatermark = %v, want %v", cfg.ConnMgrHighWatermark, DefaultConnMgrHighWatermark)
 	}
 }
 
@@ -392,6 +424,16 @@ func TestConfigOptions_Individual(t *testing.T) {
 			name:   "WithMessageBufferSize",
 			option: WithMessageBufferSize(1500),
 			check:  func(c *Config) bool { return c.MessageBufferSize == 1500 },
+		},
+		{
+			name:   "WithConnMgrLowWatermark",
+			option: WithConnMgrLowWatermark(75),
+			check:  func(c *Config) bool { return c.ConnMgrLowWatermark == 75 },
+		},
+		{
+			name:   "WithConnMgrHighWatermark",
+			option: WithConnMgrHighWatermark(300),
+			check:  func(c *Config) bool { return c.ConnMgrHighWatermark == 300 },
 		},
 	}
 
