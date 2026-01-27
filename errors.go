@@ -127,6 +127,9 @@ type Error struct {
 
 	// Retriable indicates whether the operation can be retried.
 	Retriable bool
+
+	// Hint provides troubleshooting guidance for resolving the error.
+	Hint string
 }
 
 // Error returns a human-readable error message.
@@ -180,6 +183,7 @@ func NewError(code ErrorCode, message string) *Error {
 	return &Error{
 		Code:    code,
 		Message: message,
+		Hint:    defaultHint(code),
 	}
 }
 
@@ -189,6 +193,7 @@ func NewErrorWithCause(code ErrorCode, message string, cause error) *Error {
 		Code:    code,
 		Message: message,
 		Cause:   cause,
+		Hint:    defaultHint(code),
 	}
 }
 
@@ -198,6 +203,7 @@ func NewPeerError(code ErrorCode, message string, peerID peer.ID) *Error {
 		Code:    code,
 		Message: message,
 		PeerID:  peerID,
+		Hint:    defaultHint(code),
 	}
 }
 
@@ -208,6 +214,54 @@ func NewStreamError(code ErrorCode, message string, peerID peer.ID, stream strin
 		Message: message,
 		PeerID:  peerID,
 		Stream:  stream,
+		Hint:    defaultHint(code),
+	}
+}
+
+// WithHint returns a copy of the error with the specified hint.
+func (e *Error) WithHint(hint string) *Error {
+	copy := *e
+	copy.Hint = hint
+	return &copy
+}
+
+// defaultHint returns a troubleshooting hint for the given error code.
+func defaultHint(code ErrorCode) string {
+	switch code {
+	case ErrCodeConnectionFailed:
+		return "Check that the peer is online and reachable. Verify the multiaddress is correct and any firewalls allow the connection."
+	case ErrCodeHandshakeFailed:
+		return "Ensure both peers are using compatible protocol versions and the handshake logic is correct."
+	case ErrCodeHandshakeTimeout:
+		return "The peer may be slow or unresponsive. Consider increasing HandshakeTimeout in config, or check network connectivity."
+	case ErrCodeStreamClosed:
+		return "The stream was closed by the remote peer or due to a network issue. Reconnect if needed."
+	case ErrCodeEncryptionFailed:
+		return "This may indicate a bug in message serialization or the encryption key is invalid."
+	case ErrCodeDecryptionFailed:
+		return "The message may be corrupted, or the shared key does not match. Ensure both peers completed handshake correctly."
+	case ErrCodePeerNotFound:
+		return "Add the peer to the address book using AddPeer() before connecting."
+	case ErrCodePeerBlacklisted:
+		return "The peer was blacklisted. Use RemoveFromBlacklist() if you want to allow connections."
+	case ErrCodeBufferFull:
+		return "The application is not consuming events/messages fast enough. Increase buffer sizes or process messages faster."
+	case ErrCodeContextCanceled:
+		return "The operation was cancelled. This is usually intentional via context cancellation."
+	case ErrCodeInvalidConfig:
+		return "Check that all required configuration fields are set correctly."
+	case ErrCodeNodeNotStarted:
+		return "Call node.Start() before performing operations."
+	case ErrCodeNodeAlreadyStarted:
+		return "The node is already running. Call Stop() first if you need to restart."
+	case ErrCodeVersionMismatch:
+		return "The remote peer is running an incompatible protocol version. Ensure all peers are using compatible library versions."
+	case ErrCodeMessageTooLarge:
+		return "Reduce message size or increase MaxMessageSize in config."
+	case ErrCodeBackpressure:
+		return "The send buffer is full. Wait for the peer to acknowledge messages, or increase SendBufferSize."
+	default:
+		return ""
 	}
 }
 

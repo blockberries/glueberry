@@ -295,6 +295,7 @@ func TestError_Fields(t *testing.T) {
 		Stream:    "handshake",
 		Cause:     cause,
 		Retriable: true,
+		Hint:      "custom hint",
 	}
 
 	if err.Code != ErrCodeHandshakeFailed {
@@ -315,4 +316,95 @@ func TestError_Fields(t *testing.T) {
 	if !err.Retriable {
 		t.Error("Retriable should be true")
 	}
+	if err.Hint != "custom hint" {
+		t.Errorf("Hint = %v, want %v", err.Hint, "custom hint")
+	}
+}
+
+func TestError_Hint(t *testing.T) {
+	t.Run("default hints for known error codes", func(t *testing.T) {
+		codes := []ErrorCode{
+			ErrCodeConnectionFailed,
+			ErrCodeHandshakeFailed,
+			ErrCodeHandshakeTimeout,
+			ErrCodeStreamClosed,
+			ErrCodeEncryptionFailed,
+			ErrCodeDecryptionFailed,
+			ErrCodePeerNotFound,
+			ErrCodePeerBlacklisted,
+			ErrCodeBufferFull,
+			ErrCodeContextCanceled,
+			ErrCodeInvalidConfig,
+			ErrCodeNodeNotStarted,
+			ErrCodeNodeAlreadyStarted,
+			ErrCodeVersionMismatch,
+			ErrCodeMessageTooLarge,
+			ErrCodeBackpressure,
+		}
+
+		for _, code := range codes {
+			err := NewError(code, "test message")
+			if err.Hint == "" {
+				t.Errorf("NewError(%v) should have a default hint", code)
+			}
+		}
+	})
+
+	t.Run("unknown error code has empty hint", func(t *testing.T) {
+		err := NewError(ErrCodeUnknown, "unknown error")
+		if err.Hint != "" {
+			t.Errorf("ErrCodeUnknown should have empty hint, got %q", err.Hint)
+		}
+	})
+
+	t.Run("WithHint overrides default", func(t *testing.T) {
+		err := NewError(ErrCodeConnectionFailed, "connection failed")
+		originalHint := err.Hint
+
+		customHint := "Try a different port"
+		err2 := err.WithHint(customHint)
+
+		// Original should be unchanged
+		if err.Hint != originalHint {
+			t.Error("WithHint should not modify original error")
+		}
+
+		// New error should have custom hint
+		if err2.Hint != customHint {
+			t.Errorf("WithHint error Hint = %q, want %q", err2.Hint, customHint)
+		}
+
+		// Other fields should be preserved
+		if err2.Code != err.Code {
+			t.Error("WithHint should preserve Code")
+		}
+		if err2.Message != err.Message {
+			t.Error("WithHint should preserve Message")
+		}
+	})
+
+	t.Run("constructors set default hints", func(t *testing.T) {
+		cause := errors.New("cause")
+		peerID := peer.ID("test-peer")
+
+		err1 := NewError(ErrCodeConnectionFailed, "msg")
+		if err1.Hint == "" {
+			t.Error("NewError should set default hint")
+		}
+
+		err2 := NewErrorWithCause(ErrCodeConnectionFailed, "msg", cause)
+		if err2.Hint == "" {
+			t.Error("NewErrorWithCause should set default hint")
+		}
+
+		err3 := NewPeerError(ErrCodePeerNotFound, "msg", peerID)
+		if err3.Hint == "" {
+			t.Error("NewPeerError should set default hint")
+		}
+
+		err4 := NewStreamError(ErrCodeStreamClosed, "msg", peerID, "stream")
+		if err4.Hint == "" {
+			t.Error("NewStreamError should set default hint")
+		}
+	})
 }

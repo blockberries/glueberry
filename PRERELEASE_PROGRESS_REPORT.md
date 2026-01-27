@@ -2521,3 +2521,54 @@ With `MarkEstablished` in `EstablishEncryptedStreams`, the connection would tran
 - Lock scope is 1 byte which is sufficient for advisory locking
 
 ---
+
+### Phase 3.3: Improve Error Messages
+
+**Status:** ✅ Completed
+**Priority:** P3 (Developer Experience)
+
+**Issue:** While the error system had error codes for programmatic handling, errors lacked troubleshooting guidance to help developers resolve issues quickly.
+
+**Solution:** Added a `Hint` field to the `Error` struct with default troubleshooting hints for all known error codes.
+
+**Changes:**
+
+1. **Added `Hint` field to Error struct** - Provides context-specific troubleshooting guidance
+
+2. **Added `WithHint()` method** - Allows overriding the default hint with a custom one
+
+3. **Added `defaultHint()` function** - Returns appropriate troubleshooting hints for each error code:
+   - `ErrCodeConnectionFailed`: Network connectivity guidance
+   - `ErrCodeHandshakeFailed`: Protocol compatibility advice
+   - `ErrCodeHandshakeTimeout`: Timeout tuning suggestions
+   - `ErrCodeDecryptionFailed`: Key mismatch troubleshooting
+   - `ErrCodePeerNotFound`: Address book usage reminder
+   - `ErrCodePeerBlacklisted`: Blacklist management guidance
+   - `ErrCodeBufferFull`: Buffer sizing recommendations
+   - `ErrCodeNodeNotStarted`: Lifecycle reminder
+   - And more...
+
+4. **Updated all error constructors** - `NewError`, `NewErrorWithCause`, `NewPeerError`, `NewStreamError` now automatically include default hints
+
+**Files Modified:**
+- `errors.go`:
+  - Added `Hint` field to `Error` struct
+  - Added `WithHint()` method
+  - Added `defaultHint()` function with hints for all error codes
+  - Updated all constructors to set default hints
+
+- `errors_rich_test.go`:
+  - Added `TestError_Hint` with comprehensive coverage
+  - Updated `TestError_Fields` to include Hint
+
+**Example Usage:**
+```go
+err := NewError(ErrCodeConnectionFailed, "connection refused")
+fmt.Println(err.Hint)
+// Output: "Check that the peer is online and reachable. Verify the multiaddress is correct..."
+
+// Custom hint
+err = err.WithHint("Try port 9001 instead")
+```
+
+---
