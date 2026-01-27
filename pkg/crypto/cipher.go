@@ -72,15 +72,16 @@ func (c *Cipher) Encrypt(plaintext, additionalData []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
-	return c.EncryptWithNonce(nonce, plaintext, additionalData)
+	return c.encryptWithNonce(nonce, plaintext, additionalData)
 }
 
-// EncryptWithNonce encrypts the plaintext using the provided nonce.
-// This is useful for testing or when deterministic encryption is needed.
-// WARNING: Never reuse a nonce with the same key.
+// encryptWithNonce encrypts the plaintext using the provided nonce.
+// This is an internal method used for testing or when deterministic encryption is needed.
+// WARNING: Never reuse a nonce with the same key. Nonce reuse completely breaks
+// the security of ChaCha20-Poly1305.
 //
 // The returned data format is: [12-byte nonce][ciphertext][16-byte tag]
-func (c *Cipher) EncryptWithNonce(nonce, plaintext, additionalData []byte) ([]byte, error) {
+func (c *Cipher) encryptWithNonce(nonce, plaintext, additionalData []byte) ([]byte, error) {
 	if len(nonce) != NonceSize {
 		return nil, fmt.Errorf("invalid nonce size: expected %d bytes, got %d", NonceSize, len(nonce))
 	}

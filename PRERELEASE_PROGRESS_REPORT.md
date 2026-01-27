@@ -2143,3 +2143,18 @@ type EncryptedStreamConfig struct {
 - `pkg/crypto/cipher_test.go` - Added TestCipher_Close and TestCipher_Close_ZerosKey
 
 ---
+
+### Phase 1.2: Make EncryptWithNonce Internal-Only
+
+**Status:** ✅ Completed
+**Priority:** P1 (Security)
+
+**Issue:** The `EncryptWithNonce` method was publicly exported, allowing users to provide their own nonces. Nonce reuse with ChaCha20-Poly1305 is catastrophic - it completely breaks the encryption, allowing plaintext recovery.
+
+**Fix:** Renamed `EncryptWithNonce` to `encryptWithNonce` (unexported). Since tests are in the same package (`package crypto`), they can still access the method for deterministic testing.
+
+**Files Modified:**
+- `pkg/crypto/cipher.go` - Renamed method to `encryptWithNonce`, enhanced warning comment
+- `pkg/crypto/cipher_test.go` - Updated all references to use `encryptWithNonce`
+
+---

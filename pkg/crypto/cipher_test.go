@@ -242,7 +242,7 @@ func TestCipher_Decrypt_TooShort(t *testing.T) {
 	}
 }
 
-func TestCipher_EncryptWithNonce(t *testing.T) {
+func TestCipher_encryptWithNonce(t *testing.T) {
 	key := generateRandomKey(t)
 	cipher, err := NewCipher(key)
 	if err != nil {
@@ -256,14 +256,14 @@ func TestCipher_EncryptWithNonce(t *testing.T) {
 	plaintext := []byte("test message")
 
 	// Encrypt twice with same nonce should produce same ciphertext
-	ct1, err := cipher.EncryptWithNonce(nonce, plaintext, nil)
+	ct1, err := cipher.encryptWithNonce(nonce, plaintext, nil)
 	if err != nil {
-		t.Fatalf("EncryptWithNonce failed: %v", err)
+		t.Fatalf("encryptWithNonce failed: %v", err)
 	}
 
-	ct2, err := cipher.EncryptWithNonce(nonce, plaintext, nil)
+	ct2, err := cipher.encryptWithNonce(nonce, plaintext, nil)
 	if err != nil {
-		t.Fatalf("EncryptWithNonce failed: %v", err)
+		t.Fatalf("encryptWithNonce failed: %v", err)
 	}
 
 	if !bytes.Equal(ct1, ct2) {
@@ -276,7 +276,7 @@ func TestCipher_EncryptWithNonce(t *testing.T) {
 	}
 }
 
-func TestCipher_EncryptWithNonce_InvalidNonceSize(t *testing.T) {
+func TestCipher_encryptWithNonce_InvalidNonceSize(t *testing.T) {
 	key := generateRandomKey(t)
 	cipher, err := NewCipher(key)
 	if err != nil {
@@ -297,7 +297,7 @@ func TestCipher_EncryptWithNonce_InvalidNonceSize(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			nonce := make([]byte, tc.nonceSize)
-			_, err := cipher.EncryptWithNonce(nonce, plaintext, nil)
+			_, err := cipher.encryptWithNonce(nonce, plaintext, nil)
 			if err == nil {
 				t.Error("expected error for invalid nonce size")
 			}
