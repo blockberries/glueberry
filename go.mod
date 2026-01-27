@@ -4,7 +4,7 @@ go 1.25.6
 
 require (
 	filippo.io/edwards25519 v1.1.0
-	github.com/blockberries/cramberry v1.2.0
+	github.com/blockberries/cramberry v1.4.0
 	github.com/libp2p/go-libp2p v0.46.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/prometheus/client_golang v1.22.0
