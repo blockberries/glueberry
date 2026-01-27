@@ -2572,3 +2572,46 @@ err = err.WithHint("Try port 9001 instead")
 ```
 
 ---
+
+### Phase 4.1.1: Custom Decryption Error Callback
+
+**Status:** ✅ Completed
+**Priority:** P2 (Security Observability)
+
+**Issue:** While decryption errors were logged and counted via metrics internally, applications had no way to implement custom responses like banning peers with repeated failures.
+
+**Solution:** Exposed the decryption error callback via configuration:
+
+1. **Added `DecryptionErrorCallback` type** at package level with documentation
+2. **Added `OnDecryptionError` field** to Config struct
+3. **Added `WithDecryptionErrorCallback()` config option** with usage examples
+4. **Updated node initialization** to call user callback in addition to logging/metrics
+
+**Files Modified:**
+- `config.go`:
+  - Added `DecryptionErrorCallback` type definition
+  - Added `OnDecryptionError DecryptionErrorCallback` field to Config
+  - Added `WithDecryptionErrorCallback(cb DecryptionErrorCallback) ConfigOption`
+
+- `node.go`:
+  - Updated decryption error callback to invoke user's custom callback
+
+- `config_test.go`:
+  - Added test case for `WithDecryptionErrorCallback`
+
+**Example Usage:**
+```go
+failureCounts := make(map[peer.ID]int)
+
+cfg := glueberry.NewConfig(key, path, addrs,
+    glueberry.WithDecryptionErrorCallback(func(peerID peer.ID, err error) {
+        failureCounts[peerID]++
+        if failureCounts[peerID] > 10 {
+            log.Printf("Banning peer %s after repeated decryption failures", peerID)
+            node.Blacklist(peerID)
+        }
+    }),
+)
+```
+
+---

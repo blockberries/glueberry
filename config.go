@@ -5,8 +5,19 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 )
+
+// DecryptionErrorCallback is called when message decryption fails.
+// This can indicate message tampering, key mismatch, or corruption.
+// The callback receives the peer ID and the specific error.
+//
+// Example use cases:
+//   - Log security events for monitoring
+//   - Track repeated failures to detect attacks
+//   - Ban peers with excessive decryption failures
+type DecryptionErrorCallback func(peerID peer.ID, err error)
 
 // Default configuration values.
 const (
@@ -104,6 +115,11 @@ type Config struct {
 	// prune connections down to ConnMgrLowWatermark.
 	// Set to 0 to use DefaultConnMgrHighWatermark (400).
 	ConnMgrHighWatermark int
+
+	// OnDecryptionError is called when message decryption fails.
+	// This can be used to detect tampering, log security events, or ban peers.
+	// If nil, decryption errors are only logged and counted via Metrics.
+	OnDecryptionError DecryptionErrorCallback
 }
 
 // Validate checks that the configuration is valid and returns an error
@@ -331,6 +347,31 @@ func WithConnMgrLowWatermark(n int) ConfigOption {
 func WithConnMgrHighWatermark(n int) ConfigOption {
 	return func(c *Config) {
 		c.ConnMgrHighWatermark = n
+	}
+}
+
+// WithDecryptionErrorCallback sets a callback that is invoked when message
+// decryption fails. This can indicate:
+//   - Message tampering (authentication failure)
+//   - Key mismatch (peer using wrong shared key)
+//   - Message corruption (network issues)
+//
+// The callback is invoked in addition to logging and metrics recording.
+// Use this to implement custom security responses like peer banning.
+//
+// Example:
+//
+//	cfg := glueberry.NewConfig(key, path, addrs,
+//	    glueberry.WithDecryptionErrorCallback(func(peerID peer.ID, err error) {
+//	        failureCount[peerID]++
+//	        if failureCount[peerID] > 10 {
+//	            node.Blacklist(peerID)
+//	        }
+//	    }),
+//	)
+func WithDecryptionErrorCallback(cb DecryptionErrorCallback) ConfigOption {
+	return func(c *Config) {
+		c.OnDecryptionError = cb
 	}
 }
 

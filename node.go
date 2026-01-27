@@ -157,13 +157,17 @@ func New(cfg *Config) (*Node, error) {
 	// Create stream manager - uses internal messages channel
 	streamMgr := streams.NewManager(ctx, libp2pHost, cryptoModule, internalMsgsChan)
 
-	// Wire up decryption error callback for logging and metrics
+	// Wire up decryption error callback for logging, metrics, and custom handler
 	streamMgr.SetDecryptionErrorCallback(func(peerID peer.ID, err error) {
 		if cfg.Logger != nil {
 			cfg.Logger.Warn("decryption failed", "peer_id", peerID.String(), "error", err.Error())
 		}
 		if cfg.Metrics != nil {
 			cfg.Metrics.DecryptionError()
+		}
+		// Call user's custom callback if provided
+		if cfg.OnDecryptionError != nil {
+			cfg.OnDecryptionError(peerID, err)
 		}
 	})
 

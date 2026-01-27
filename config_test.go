@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -434,6 +435,11 @@ func TestConfigOptions_Individual(t *testing.T) {
 			name:   "WithConnMgrHighWatermark",
 			option: WithConnMgrHighWatermark(300),
 			check:  func(c *Config) bool { return c.ConnMgrHighWatermark == 300 },
+		},
+		{
+			name:   "WithDecryptionErrorCallback",
+			option: WithDecryptionErrorCallback(func(peerID peer.ID, err error) {}),
+			check:  func(c *Config) bool { return c.OnDecryptionError != nil },
 		},
 	}
 
