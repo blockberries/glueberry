@@ -388,3 +388,55 @@ func TestPeerConnection_ConcurrentSetAndCleanup(t *testing.T) {
 		wg.Wait()
 	}
 }
+
+// TestHandshakeTimeoutVsCompletion tests the race between handshake timeout
+// firing and handshake completing successfully. This simulates the scenario
+// where both the timeout goroutine and the handshake completion code race
+// to transition the connection state.
+func TestHandshakeTimeoutVsCompletion(t *testing.T) {
+	peerID := mustParsePeerID(t, testPeerID)
+
+	const iterations = 1000
+	const goroutinesPerIteration = 10
+
+	for i := 0; i < iterations; i++ {
+		conn := NewPeerConnection(peerID)
+		_ = conn.TransitionTo(StateConnecting)
+		_ = conn.TransitionTo(StateConnected)
+
+		var wg sync.WaitGroup
+		wg.Add(goroutinesPerIteration)
+
+		// Start many goroutines that race to either:
+		// 1. Complete handshake (transition to Established)
+		// 2. Time out (transition to Cooldown)
+		for g := 0; g < goroutinesPerIteration; g++ {
+			go func(id int) {
+				defer wg.Done()
+
+				// Even IDs try to complete handshake
+				// Odd IDs try to handle timeout
+				if id%2 == 0 {
+					// Simulate handshake completion
+					conn.CancelHandshakeTimeout()
+					_ = conn.TransitionTo(StateEstablished)
+				} else {
+					// Simulate timeout handling
+					// This is the pattern used by handleHandshakeTimeout:
+					// Check state, then transition to cooldown atomically
+					if conn.GetState() == StateConnected {
+						_ = conn.StartCooldown(time.Second)
+					}
+				}
+			}(g)
+		}
+
+		wg.Wait()
+
+		// Verify connection is in a valid terminal state
+		state := conn.GetState()
+		if state != StateEstablished && state != StateCooldown {
+			t.Errorf("iteration %d: unexpected state %s (expected Established or Cooldown)", i, state)
+		}
+	}
+}

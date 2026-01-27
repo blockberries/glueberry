@@ -2158,3 +2158,35 @@ type EncryptedStreamConfig struct {
 - `pkg/crypto/cipher_test.go` - Updated all references to use `encryptWithNonce`
 
 ---
+
+### Phase 1.3: Fix Handshake Timeout Race Condition
+
+**Status:** ✅ Completed
+**Priority:** P1 (Security/Correctness)
+
+**Issue:** A race condition existed between handshake timeout firing and handshake completing. The sequence was:
+1. Timeout timer fires
+2. `handleHandshakeTimeout` checks state == StateConnected ✓
+3. Mutex unlocked
+4. Meanwhile, `MarkEstablished` completes handshake, transitions to StateEstablished
+5. `handleHandshakeTimeout` continues, disconnects an **established** connection!
+
+**Fix:** Changed `handleHandshakeTimeout` to atomically transition to StateCooldown while holding the lock. If the transition fails (because another goroutine changed the state), we bail out without disconnecting:
+
+```go
+// Atomically transition to cooldown while holding the lock.
+// This prevents the race where handshake completes between our state check
+// and the disconnect call.
+if err := conn.StartCooldown(m.config.FailedHandshakeCooldown); err != nil {
+    m.mu.Unlock()
+    return // Another goroutine is handling this or state changed
+}
+m.mu.Unlock()
+// Now we "own" the cleanup
+```
+
+**Files Modified:**
+- `pkg/connection/manager.go` - Fixed `handleHandshakeTimeout` to use atomic state transition
+- `pkg/connection/stress_test.go` - Added `TestHandshakeTimeoutVsCompletion` stress test
+
+---

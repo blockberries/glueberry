@@ -327,6 +327,8 @@ func (m *Manager) setupHandshakeTimeout(conn *PeerConnection) {
 }
 
 // handleHandshakeTimeout handles a handshake timeout.
+// This function handles the race between timeout firing and handshake completing
+// by atomically transitioning to cooldown state before doing any cleanup.
 func (m *Manager) handleHandshakeTimeout(peerID peer.ID) {
 	m.mu.Lock()
 	conn, exists := m.connections[peerID]
@@ -341,18 +343,22 @@ func (m *Manager) handleHandshakeTimeout(peerID peer.ID) {
 		return
 	}
 
+	// Atomically transition to cooldown while holding the lock.
+	// This prevents the race where handshake completes between our state check
+	// and the disconnect call. If this fails (e.g., state changed), bail out.
+	if err := conn.StartCooldown(m.config.FailedHandshakeCooldown); err != nil {
+		// State changed between check and transition - another goroutine handled it
+		m.mu.Unlock()
+		return
+	}
 	m.mu.Unlock()
 
+	// We successfully transitioned to cooldown, so we "own" the cleanup.
 	// Cancel handshake timeout resources
 	conn.CancelHandshakeTimeout()
 
 	// Disconnect the peer
 	_ = m.host.Disconnect(peerID) // Ignore error - best effort disconnect
-
-	// Transition to cooldown
-	m.mu.Lock()
-	_ = conn.StartCooldown(m.config.FailedHandshakeCooldown) // Ignore error - cleanup path
-	m.mu.Unlock()
 
 	m.emitEvent(peerID, StateCooldown, fmt.Errorf("handshake timeout"))
 
