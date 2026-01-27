@@ -7,6 +7,22 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
+const (
+	// NonceExhaustionWarningThreshold is the number of messages sent to a peer
+	// after which a warning is emitted about potential nonce exhaustion.
+	//
+	// ChaCha20-Poly1305 uses 96-bit random nonces. Due to the birthday paradox,
+	// after ~2^48 messages there's a 50% chance of nonce collision. At 2^40
+	// messages, the collision probability is approximately 2^-16 (1 in 65536).
+	//
+	// When this threshold is crossed, applications should consider:
+	// - Rotating the shared key via a new handshake
+	// - Monitoring for unusual traffic patterns
+	//
+	// This is a conservative threshold providing a safety margin.
+	NonceExhaustionWarningThreshold int64 = 1 << 40 // ~1 trillion messages
+)
+
 // StreamStats contains statistics for a single stream.
 type StreamStats struct {
 	// Name is the stream name.
@@ -76,10 +92,16 @@ type PeerStats struct {
 	FailureCount int
 }
 
+// NonceExhaustionCallback is called when message count exceeds the warning threshold.
+// It receives the peer ID and the current message count.
+type NonceExhaustionCallback func(peerID peer.ID, messageCount int64)
+
 // PeerStatsTracker is the internal mutable stats tracker.
 // It implements connection.StatsRecorder and is stored per-peer.
 type PeerStatsTracker struct {
 	mu sync.RWMutex
+
+	peerID peer.ID // stored for callback invocation
 
 	connectedAt      time.Time
 	totalConnectTime time.Duration
@@ -94,6 +116,12 @@ type PeerStatsTracker struct {
 	lastMessageAt   time.Time
 	connectionCount int
 	failureCount    int
+
+	// nonceWarningEmitted tracks whether the nonce exhaustion warning was emitted
+	nonceWarningEmitted bool
+
+	// onNonceExhaustion is called when the message count exceeds the warning threshold
+	onNonceExhaustion NonceExhaustionCallback
 }
 
 // streamStatsInternal is the internal mutable stream stats tracker.
@@ -107,9 +135,11 @@ type streamStatsInternal struct {
 }
 
 // NewPeerStatsTracker creates a new stats tracker for a peer.
-func NewPeerStatsTracker() *PeerStatsTracker {
+func NewPeerStatsTracker(peerID peer.ID, onNonceExhaustion NonceExhaustionCallback) *PeerStatsTracker {
 	return &PeerStatsTracker{
-		streamStats: make(map[string]*streamStatsInternal),
+		peerID:            peerID,
+		streamStats:       make(map[string]*streamStatsInternal),
+		onNonceExhaustion: onNonceExhaustion,
 	}
 }
 
@@ -147,7 +177,6 @@ func (s *PeerStatsTracker) RecordFailure() {
 // Implements connection.StatsRecorder.
 func (s *PeerStatsTracker) RecordMessageSent(streamName string, size int) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	now := time.Now()
 
@@ -163,6 +192,24 @@ func (s *PeerStatsTracker) RecordMessageSent(streamName string, size int) {
 	ss.messagesSent++
 	ss.bytesSent += int64(size)
 	ss.lastSentAt = now
+
+	// Check for nonce exhaustion warning
+	shouldWarn := !s.nonceWarningEmitted &&
+		s.messagesSent >= NonceExhaustionWarningThreshold &&
+		s.onNonceExhaustion != nil
+	if shouldWarn {
+		s.nonceWarningEmitted = true
+	}
+	peerID := s.peerID
+	messageCount := s.messagesSent
+	callback := s.onNonceExhaustion
+
+	s.mu.Unlock()
+
+	// Call callback outside the lock to avoid deadlocks
+	if shouldWarn && callback != nil {
+		callback(peerID, messageCount)
+	}
 }
 
 // RecordMessageReceived records a message being received.

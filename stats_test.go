@@ -9,7 +9,7 @@ import (
 )
 
 func TestPeerStatsTracker_RecordMessageSent(t *testing.T) {
-	tracker := NewPeerStatsTracker()
+	tracker := NewPeerStatsTracker(peer.ID("test-peer"), nil)
 
 	// Record some messages
 	tracker.RecordMessageSent("data", 100)
@@ -48,7 +48,7 @@ func TestPeerStatsTracker_RecordMessageSent(t *testing.T) {
 }
 
 func TestPeerStatsTracker_RecordMessageReceived(t *testing.T) {
-	tracker := NewPeerStatsTracker()
+	tracker := NewPeerStatsTracker(peer.ID("test-peer"), nil)
 
 	tracker.RecordMessageReceived("data", 500)
 	tracker.RecordMessageReceived("data", 300)
@@ -68,7 +68,7 @@ func TestPeerStatsTracker_RecordMessageReceived(t *testing.T) {
 }
 
 func TestPeerStatsTracker_RecordConnectionStartEnd(t *testing.T) {
-	tracker := NewPeerStatsTracker()
+	tracker := NewPeerStatsTracker(peer.ID("test-peer"), nil)
 
 	// Start connection
 	tracker.RecordConnectionStart()
@@ -89,7 +89,7 @@ func TestPeerStatsTracker_RecordConnectionStartEnd(t *testing.T) {
 }
 
 func TestPeerStatsTracker_RecordFailure(t *testing.T) {
-	tracker := NewPeerStatsTracker()
+	tracker := NewPeerStatsTracker(peer.ID("test-peer"), nil)
 
 	tracker.RecordFailure()
 	tracker.RecordFailure()
@@ -103,7 +103,7 @@ func TestPeerStatsTracker_RecordFailure(t *testing.T) {
 }
 
 func TestPeerStatsTracker_Concurrent(t *testing.T) {
-	tracker := NewPeerStatsTracker()
+	tracker := NewPeerStatsTracker(peer.ID("test-peer"), nil)
 
 	var wg sync.WaitGroup
 	numGoroutines := 10
@@ -136,7 +136,7 @@ func TestPeerStatsTracker_Concurrent(t *testing.T) {
 }
 
 func TestPeerStatsTracker_LastMessageAt(t *testing.T) {
-	tracker := NewPeerStatsTracker()
+	tracker := NewPeerStatsTracker(peer.ID("test-peer"), nil)
 
 	before := time.Now()
 	tracker.RecordMessageSent("test", 100)
@@ -160,7 +160,7 @@ func TestPeerStatsTracker_LastMessageAt(t *testing.T) {
 }
 
 func TestPeerStatsTracker_TotalConnectTimeDuringConnection(t *testing.T) {
-	tracker := NewPeerStatsTracker()
+	tracker := NewPeerStatsTracker(peer.ID("test-peer"), nil)
 
 	// Start connection
 	tracker.RecordConnectionStart()
@@ -246,4 +246,60 @@ func TestStreamStats_Fields(t *testing.T) {
 	if stats.MessagesReceived != 20 {
 		t.Errorf("MessagesReceived = %d, want 20", stats.MessagesReceived)
 	}
+}
+
+func TestPeerStatsTracker_NonceExhaustionWarning(t *testing.T) {
+	peerID := peer.ID("test-peer")
+	var callbackInvoked bool
+	var callbackCount int64
+
+	callback := func(pid peer.ID, count int64) {
+		callbackInvoked = true
+		callbackCount = count
+		if pid != peerID {
+			t.Errorf("callback peerID = %v, want %v", pid, peerID)
+		}
+	}
+
+	tracker := NewPeerStatsTracker(peerID, callback)
+
+	// Set messagesSent to 2 below threshold
+	tracker.mu.Lock()
+	tracker.messagesSent = NonceExhaustionWarningThreshold - 2
+	tracker.mu.Unlock()
+
+	// This should NOT trigger the warning (will be at threshold-1)
+	tracker.RecordMessageSent("data", 100)
+	if callbackInvoked {
+		t.Error("callback should not be invoked below threshold")
+	}
+
+	// This SHOULD trigger the warning (now at threshold)
+	tracker.RecordMessageSent("data", 100)
+	if !callbackInvoked {
+		t.Error("callback should be invoked at threshold")
+	}
+	if callbackCount != NonceExhaustionWarningThreshold {
+		t.Errorf("callback count = %d, want %d", callbackCount, NonceExhaustionWarningThreshold)
+	}
+
+	// Reset and send more - callback should NOT be invoked again
+	callbackInvoked = false
+	tracker.RecordMessageSent("data", 100)
+	if callbackInvoked {
+		t.Error("callback should only be invoked once")
+	}
+}
+
+func TestPeerStatsTracker_NonceExhaustionWarning_NilCallback(t *testing.T) {
+	// Should not panic with nil callback
+	tracker := NewPeerStatsTracker(peer.ID("test-peer"), nil)
+
+	tracker.mu.Lock()
+	tracker.messagesSent = NonceExhaustionWarningThreshold - 1
+	tracker.mu.Unlock()
+
+	// Should not panic
+	tracker.RecordMessageSent("data", 100)
+	tracker.RecordMessageSent("data", 100)
 }

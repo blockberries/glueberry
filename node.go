@@ -746,6 +746,28 @@ func (n *Node) PeerStatistics(peerID peer.ID) *PeerStats {
 	return tracker.Snapshot(peerID, connected, isOutbound)
 }
 
+// MessagesSent returns the total number of messages sent to a specific peer.
+// Returns 0 if the peer has no recorded statistics.
+//
+// This is useful for monitoring nonce exhaustion risk. When the count approaches
+// NonceExhaustionWarningThreshold (2^40), consider rotating the shared key
+// via a new handshake to avoid potential nonce collision.
+func (n *Node) MessagesSent(peerID peer.ID) uint64 {
+	n.peerStatsMu.RLock()
+	tracker := n.peerStats[peerID]
+	n.peerStatsMu.RUnlock()
+
+	if tracker == nil {
+		return 0
+	}
+
+	tracker.mu.RLock()
+	count := tracker.messagesSent
+	tracker.mu.RUnlock()
+
+	return uint64(count)
+}
+
 // AllPeerStatistics returns statistics for all peers with recorded stats.
 func (n *Node) AllPeerStatistics() map[peer.ID]*PeerStats {
 	n.peerStatsMu.RLock()
@@ -771,7 +793,17 @@ func (n *Node) getOrCreatePeerStats(peerID peer.ID) *PeerStatsTracker {
 
 	tracker := n.peerStats[peerID]
 	if tracker == nil {
-		tracker = NewPeerStatsTracker()
+		// Create callback for nonce exhaustion warning
+		onNonceExhaustion := func(pid peer.ID, count int64) {
+			if n.logger != nil {
+				n.logger.Warn("nonce exhaustion warning: high message count may risk nonce collision",
+					"peer_id", pid.String(),
+					"messages_sent", count,
+					"threshold", NonceExhaustionWarningThreshold,
+					"recommendation", "consider rotating the shared key via a new handshake")
+			}
+		}
+		tracker = NewPeerStatsTracker(peerID, onNonceExhaustion)
 		n.peerStats[peerID] = tracker
 	}
 	return tracker

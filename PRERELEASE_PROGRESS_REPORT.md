@@ -2615,3 +2615,60 @@ cfg := glueberry.NewConfig(key, path, addrs,
 ```
 
 ---
+
+### Phase 4.1.2: Nonce Exhaustion Warning
+
+**Status:** ✅ Completed
+**Priority:** P2 (Security Observability)
+
+**Issue:** ChaCha20-Poly1305 uses 96-bit random nonces. Due to the birthday paradox, after ~2^48 messages there's a 50% chance of nonce collision. Applications had no visibility into message counts to detect when key rotation might be advisable.
+
+**Solution:** Implemented a warning system that fires once per peer when message count exceeds a conservative threshold:
+
+1. **Added `NonceExhaustionWarningThreshold` constant** (2^40 = ~1 trillion messages) - provides safety margin well before collision probability becomes significant
+
+2. **Added `NonceExhaustionCallback` type** for user-defined warning handlers
+
+3. **Updated `PeerStatsTracker`**:
+   - Added `peerID` field to track which peer for callback invocation
+   - Added `nonceWarningEmitted` flag to ensure warning fires only once
+   - Added `onNonceExhaustion` callback field
+   - Updated `RecordMessageSent()` to check threshold and invoke callback outside lock
+
+4. **Updated `NewPeerStatsTracker()` signature** to accept peer ID and callback
+
+5. **Wired callback in node.go** - logs warning when threshold exceeded
+
+**Files Modified:**
+- `stats.go`:
+  - Added `NonceExhaustionWarningThreshold` constant with documentation
+  - Added `NonceExhaustionCallback` type
+  - Updated `PeerStatsTracker` struct with warning tracking fields
+  - Updated `NewPeerStatsTracker(peerID peer.ID, callback NonceExhaustionCallback)`
+  - Updated `RecordMessageSent()` to check threshold and emit warning
+
+- `stats_test.go`:
+  - Updated all `NewPeerStatsTracker()` calls to use new signature
+  - Added `TestPeerStatsTracker_NonceExhaustionWarning`
+  - Added `TestPeerStatsTracker_NonceExhaustionWarning_NilCallback`
+
+- `node.go`:
+  - Updated `getOrCreatePeerStats()` to pass nonce exhaustion callback
+
+**Example Usage:**
+```go
+// The warning is logged automatically by the node when threshold is exceeded.
+// Applications can also monitor message counts directly:
+messageCount := node.MessagesSent(peerID)
+
+// The callback receives the peer ID and current count when threshold crossed:
+// "nonce exhaustion warning: peer QmXyz has sent 1099511627776 messages, consider key rotation"
+```
+
+**Design Notes:**
+- Callback invoked outside mutex to prevent deadlocks
+- Warning fires exactly once per peer (flag prevents repeated warnings)
+- Threshold is conservative (2^40) - actual collision risk starts around 2^48
+- Nil callback is safe - no panic, just skips notification
+
+---
