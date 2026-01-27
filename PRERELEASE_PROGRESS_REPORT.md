@@ -2832,3 +2832,77 @@ func main() {
 - Configurable namespace variable
 
 ---
+
+### Phase 4.2.2: OpenTelemetry Integration
+
+**Status:** ✅ Completed
+**Priority:** P2 (Observability)
+
+**Issue:** Glueberry had no distributed tracing capability. Users couldn't trace operations across multiple nodes or correlate network activity with application-level traces.
+
+**Solution:** Created an OpenTelemetry tracing package in `otel/` subpackage:
+
+1. **Created `otel/` subpackage** with Tracer implementation
+2. **Defined span hierarchy** for all major operations:
+   - `glueberry.connect` (with nested dial, handshake spans)
+   - `glueberry.handshake` (with key derivation, stream setup)
+   - `glueberry.send` / `glueberry.receive`
+   - `glueberry.encrypt` / `glueberry.decrypt`
+   - `glueberry.disconnect`
+3. **Standard span attributes**:
+   - `peer.id`: Remote peer identifier
+   - `stream.name`: Stream name for message operations
+   - `message.size`: Size of sent/received messages
+   - `connection.direction`: "inbound" or "outbound"
+   - `handshake.result`: "success", "failure", "timeout"
+4. **NopTracer** for when tracing is disabled (zero overhead)
+
+**Span Names:**
+| Span Name | Description |
+|-----------|-------------|
+| `glueberry.connect` | Connection attempt (client) |
+| `glueberry.dial` | TCP dial operation |
+| `glueberry.handshake` | Handshake process |
+| `glueberry.key_derivation` | ECDH key derivation |
+| `glueberry.stream_setup` | Encrypted stream setup |
+| `glueberry.established` | Connection established |
+| `glueberry.send` | Message send (producer) |
+| `glueberry.encrypt` | Message encryption |
+| `glueberry.write` | Network write |
+| `glueberry.receive` | Message receive (consumer) |
+| `glueberry.read` | Network read |
+| `glueberry.decrypt` | Message decryption |
+| `glueberry.disconnect` | Disconnection |
+
+**Files Created:**
+- `otel/tracing.go`: Tracer implementation with all span types
+- `otel/tracing_test.go`: Comprehensive tests
+
+**Example Usage:**
+```go
+import (
+    "github.com/blockberries/glueberry"
+    glueberryotel "github.com/blockberries/glueberry/otel"
+    "go.opentelemetry.io/otel"
+)
+
+func main() {
+    tp := otel.GetTracerProvider()
+    tracer := glueberryotel.NewTracer(tp)
+
+    cfg := glueberry.NewConfig(key, path, addrs,
+        glueberry.WithTracer(tracer),
+    )
+
+    node, err := glueberry.New(cfg)
+    // ...
+}
+```
+
+**Design Notes:**
+- Uses `go.opentelemetry.io/otel/trace/noop` for disabled tracing
+- All span methods return context for propagation
+- Helper methods for recording errors and results
+- Span kinds set appropriately (Client, Producer, Consumer)
+
+---
