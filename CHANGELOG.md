@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-01-27
+
+### Fixed
+- **Critical**: Fixed double-close race in subscription channels that could cause panic during concurrent unsubscribe and node shutdown
+- **Medium**: Fixed encrypted stream close during write race by using RWMutex to protect cipher operations
+- **Medium**: Oversized message buffers are now securely zeroed before being dropped
+
+### Added
+- `TestChaos_SubscriptionDoubleClose` test to verify subscription race fix
+
 ## [1.2.2] - 2026-01-27
 
 ### Changed
@@ -149,6 +159,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Glueberry Version | Protocol Version | Cramberry Version | Go Version |
 |-------------------|------------------|-------------------|------------|
+| 1.2.3             | 1.2.3            | 1.4.2             | 1.21+      |
 | 1.2.2             | 1.2.2            | 1.4.2             | 1.21+      |
 | 1.2.1             | 1.2.1            | 1.4.1             | 1.21+      |
 | 1.2.0             | 1.2.0            | 1.2.0             | 1.21+      |
