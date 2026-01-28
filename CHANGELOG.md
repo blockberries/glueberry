@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.6] - 2026-01-28
+
+### Changed
+- Updated Cramberry dependency to v1.5.0
+
 ## [1.2.5] - 2026-01-27
 
 ### Fixed
@@ -173,6 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Glueberry Version | Protocol Version | Cramberry Version | Go Version |
 |-------------------|------------------|-------------------|------------|
+| 1.2.6             | 1.2.6            | 1.5.0             | 1.21+      |
 | 1.2.5             | 1.2.5            | 1.4.3             | 1.21+      |
 | 1.2.4             | 1.2.4            | 1.4.3             | 1.21+      |
 | 1.2.3             | 1.2.3            | 1.4.2             | 1.21+      |
