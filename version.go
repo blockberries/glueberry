@@ -15,7 +15,7 @@ const (
 
 	// ProtocolVersionPatch is the patch protocol version.
 	// Bug fixes increment this.
-	ProtocolVersionPatch = 6
+	ProtocolVersionPatch = 7
 )
 
 // ProtocolVersion represents the Glueberry protocol version.
