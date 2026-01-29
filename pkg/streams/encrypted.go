@@ -232,6 +232,10 @@ func (es *EncryptedStream) readLoop() {
 
 		// Decrypt the message
 		decrypted, err := es.cipher.Decrypt(encrypted, nil)
+
+		// Zero the encrypted buffer after decryption attempt (defense in depth)
+		crypto.SecureZero(encrypted)
+
 		if err != nil {
 			// Decryption failure could indicate tampering or wrong key
 			// Report the error for logging/metrics if callback is set
@@ -254,10 +258,13 @@ func (es *EncryptedStream) readLoop() {
 		case es.incoming <- msg:
 			// Message delivered
 		case <-es.ctx.Done():
-			// Stream closed while sending
+			// Stream closed while sending - zero plaintext before returning
+			crypto.SecureZero(decrypted)
 			return
 		default:
 			// Channel full - drop message to prevent blocking
+			// Zero plaintext data since it won't be delivered
+			crypto.SecureZero(decrypted)
 			if es.onMessageDropped != nil {
 				es.onMessageDropped(es.peerID, es.name)
 			}

@@ -498,11 +498,16 @@ func (m *Manager) attemptReconnect(peerID peer.ID) error {
 		return err
 	}
 
-	// Update state
+	// Update state and set up handshake timeout
 	m.mu.Lock()
 	conn := m.connections[peerID]
 	if conn != nil {
 		_ = conn.TransitionTo(StateConnected) // Ignore error - reconnection success
+
+		// Set up handshake timeout for reconnected connection.
+		// Reconnected peers must complete the handshake within the timeout,
+		// just like initial and incoming connections.
+		m.setupHandshakeTimeout(conn)
 	}
 	m.mu.Unlock()
 
@@ -511,7 +516,6 @@ func (m *Manager) attemptReconnect(peerID peer.ID) error {
 	// Update last seen (ignore error - not critical)
 	_ = m.addressBook.UpdateLastSeen(peerID)
 
-	// Reconnection successful - handshake stream will be opened when app calls Connect() again
 	return nil
 }
 
@@ -687,14 +691,23 @@ func (m *Manager) GetOrCreateConnection(peerID peer.ID) *PeerConnection {
 // RegisterIncomingConnection registers an incoming connection and transitions to StateConnected.
 // This should be called when a new incoming connection is established.
 // It also starts the handshake timeout.
+// All operations are performed atomically under the manager lock to prevent race conditions.
 func (m *Manager) RegisterIncomingConnection(peerID peer.ID) error {
-	conn := m.GetOrCreateConnection(peerID)
+	m.mu.Lock()
+
+	// Get or create connection while holding lock
+	conn, exists := m.connections[peerID]
+	if !exists {
+		conn = NewPeerConnection(peerID)
+		m.connections[peerID] = conn
+	}
 
 	// Mark as inbound connection (they initiated it)
 	conn.SetIsOutbound(false)
 
 	// Transition through states to reach Connected
 	state := conn.GetState()
+	shouldEmit := false
 
 	if state == StateDisconnected {
 		_ = conn.TransitionTo(StateConnecting)
@@ -702,7 +715,13 @@ func (m *Manager) RegisterIncomingConnection(peerID peer.ID) error {
 
 		// Start handshake timeout for incoming connection
 		m.setupHandshakeTimeout(conn)
+		shouldEmit = true
+	}
 
+	m.mu.Unlock()
+
+	// Emit event outside lock to prevent deadlocks
+	if shouldEmit {
 		m.emitEvent(peerID, StateConnected, nil)
 	}
 

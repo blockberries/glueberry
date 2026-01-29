@@ -230,6 +230,87 @@ All tests pass with race detection enabled:
 
 ---
 
+## Fourth Iteration - January 2026
+
+A follow-up deep-dive review was performed focusing on edge cases and security patterns.
+
+### Bug Fixes Applied
+
+#### 15. Race Condition in RegisterIncomingConnection (CONCURRENCY - HIGH)
+
+**File:** `/pkg/connection/manager.go`
+
+**Issue:** The `RegisterIncomingConnection()` function called `GetOrCreateConnection()` which released the lock, then performed multiple operations (SetIsOutbound, GetState, TransitionTo, setupHandshakeTimeout) without holding the manager lock. This created a race condition where concurrent operations (like Disconnect) could interfere.
+
+**Fix:** Refactored to hold the manager lock through all operations, only releasing before emitting the event to prevent deadlocks.
+
+**Impact:** High - Could cause race conditions with concurrent connection management.
+
+---
+
+#### 16. Missing Handshake Timeout on Reconnection (FUNCTIONALITY - MEDIUM)
+
+**File:** `/pkg/connection/manager.go`
+
+**Issue:** When `attemptReconnect()` successfully reconnected a peer, it transitioned to `StateConnected` but did NOT set up a handshake timeout. This meant reconnected peers could stay in StateConnected indefinitely without completing the handshake, unlike initial and incoming connections which have timeouts.
+
+**Fix:** Added `m.setupHandshakeTimeout(conn)` call after transitioning reconnected peers to StateConnected.
+
+**Impact:** Medium - Reconnected peers could hang indefinitely without completing handshake.
+
+---
+
+#### 17. Decrypted Data Not Zeroed on Drop/Cancellation (SECURITY - HIGH)
+
+**File:** `/pkg/streams/encrypted.go`
+
+**Issue:** In the `readLoop()` method, when a decrypted message was dropped (channel full) or the context was cancelled during send, the plaintext `decrypted` buffer was not zeroed. Sensitive decrypted message contents could persist in memory.
+
+**Fix:** Added `crypto.SecureZero(decrypted)` calls when messages are dropped and when returning due to context cancellation.
+
+**Impact:** High - Plaintext message data could leak in memory dumps.
+
+---
+
+#### 18. Encrypted Buffer Not Zeroed After Decryption (SECURITY - MEDIUM)
+
+**File:** `/pkg/streams/encrypted.go`
+
+**Issue:** After successful or failed decryption, the `encrypted` ciphertext buffer was not zeroed (except for oversized messages). While ciphertext is less sensitive than plaintext, defense-in-depth principles dictate minimizing data exposure.
+
+**Fix:** Added `crypto.SecureZero(encrypted)` immediately after decryption attempt, regardless of success or failure.
+
+**Impact:** Medium - Defense in depth improvement for security.
+
+---
+
+### Issues Reviewed and Deemed Not Bugs
+
+1. **FilteredEvents subscription tracking:** Initially flagged as potential leak, but verified that cleanup works correctly via the base subscription being tracked in eventSubs. When node shuts down, baseSub's channel is closed, which causes the filtering goroutine to exit and close the filtered channel.
+
+### Additional Issues Identified (Not Fixed - Lower Priority)
+
+The following issues remain from previous iterations:
+
+1. **Flow Controller Cleanup**: The `flowControllers` map grows unbounded.
+2. **Prometheus Label Cardinality**: Stream names as metric labels could cause cardinality explosion.
+3. **Address Book flushLoop/Close() Race**: Minor race - goroutine not waited for.
+
+---
+
+## Test Results
+
+All tests pass with race detection enabled:
+- `go test -race ./...` - All packages pass
+- `go build ./...` - Clean build
+- `golangci-lint run` - No issues
+
+## Dependency Status
+
+- `github.com/blockberries/cramberry v1.5.3` - Latest version (verified January 2026)
+
+---
+
 ## Recommendations for Future Reviews
 
 1. **Key Material Handling:** Always verify that any code creating `Cipher` instances calls `Close()` appropriately, and that raw ECDH shared secrets are zeroed.
@@ -239,3 +320,5 @@ All tests pass with race detection enabled:
 5. **TOCTOU Prevention:** When operating on resources obtained from a map, prefer holding the lock through the entire operation rather than releasing between check and use.
 6. **Timer Resources:** Use `time.NewTimer()` instead of `time.After()` when the timer might need to be cancelled before firing.
 7. **RWMutex for Read-Heavy Operations:** Use `RWMutex` instead of `Mutex` for structures where reads vastly outnumber writes (like `IsClosed()` checks).
+8. **Plaintext Zeroing:** Always zero decrypted/plaintext data when it's no longer needed, especially on error paths and when messages are dropped.
+9. **Lock Scope in Registration:** When registering connections, hold the lock through state transitions to prevent race conditions with concurrent operations.
