@@ -21,6 +21,9 @@ type Module struct {
 	// map[string][]byte where key is peer's X25519 public key as string
 	peerKeys   map[string][]byte
 	peerKeysMu sync.RWMutex
+
+	// closed indicates that Close() has been called and keys have been zeroed
+	closed bool
 }
 
 // NewModule creates a new crypto module with the given Ed25519 private key.
@@ -41,6 +44,8 @@ func NewModule(privateKey ed25519.PrivateKey) (*Module, error) {
 
 	x25519Pub, err := Ed25519PublicToX25519(publicKey)
 	if err != nil {
+		// Zero the X25519 private key before returning error
+		SecureZero(x25519Priv)
 		return nil, fmt.Errorf("failed to convert public key to X25519: %w", err)
 	}
 
@@ -89,25 +94,40 @@ func (m *Module) DeriveSharedKeyFromX25519(remoteX25519 []byte) ([]byte, error) 
 			X25519KeySize, len(remoteX25519))
 	}
 
-	// Check cache first
+	// Check cache first and copy private key while holding lock
 	cacheKey := string(remoteX25519)
 	m.peerKeysMu.RLock()
-	if key, ok := m.peerKeys[cacheKey]; ok {
+	if m.closed {
 		m.peerKeysMu.RUnlock()
+		return nil, fmt.Errorf("module is closed")
+	}
+	if key, ok := m.peerKeys[cacheKey]; ok {
 		result := make([]byte, len(key))
 		copy(result, key)
+		m.peerKeysMu.RUnlock()
 		return result, nil
 	}
+	// Copy x25519Private while holding lock to prevent race with Close()
+	x25519PrivCopy := make([]byte, len(m.x25519Private))
+	copy(x25519PrivCopy, m.x25519Private)
 	m.peerKeysMu.RUnlock()
 
-	// Derive new shared key
-	sharedKey, err := DeriveSharedKey(m.x25519Private, remoteX25519, nil)
+	// Zero the copy after use
+	defer SecureZero(x25519PrivCopy)
+
+	// Derive new shared key using the copy
+	sharedKey, err := DeriveSharedKey(x25519PrivCopy, remoteX25519, nil)
 	if err != nil {
 		return nil, fmt.Errorf("key derivation failed: %w", err)
 	}
 
 	// Cache the key
 	m.peerKeysMu.Lock()
+	if m.closed {
+		m.peerKeysMu.Unlock()
+		SecureZero(sharedKey)
+		return nil, fmt.Errorf("module is closed")
+	}
 	m.peerKeys[cacheKey] = sharedKey
 	m.peerKeysMu.Unlock()
 
@@ -162,28 +182,48 @@ func (m *Module) ClearPeerKeys() {
 // The peer must have a cached shared key (via DeriveSharedKey).
 func (m *Module) Encrypt(remoteX25519, plaintext []byte) ([]byte, error) {
 	m.peerKeysMu.RLock()
+	if m.closed {
+		m.peerKeysMu.RUnlock()
+		return nil, fmt.Errorf("module is closed")
+	}
 	key, ok := m.peerKeys[string(remoteX25519)]
-	m.peerKeysMu.RUnlock()
-
 	if !ok {
+		m.peerKeysMu.RUnlock()
 		return nil, fmt.Errorf("no shared key for peer: call DeriveSharedKey first")
 	}
+	// Copy key before releasing lock to prevent TOCTOU race with RemovePeerKey
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
+	m.peerKeysMu.RUnlock()
 
-	return Encrypt(key, plaintext, nil)
+	// Zero the copy after use
+	defer SecureZero(keyCopy)
+
+	return Encrypt(keyCopy, plaintext, nil)
 }
 
 // Decrypt decrypts ciphertext using the shared key derived for the given peer.
 // The peer must have a cached shared key (via DeriveSharedKey).
 func (m *Module) Decrypt(remoteX25519, ciphertext []byte) ([]byte, error) {
 	m.peerKeysMu.RLock()
+	if m.closed {
+		m.peerKeysMu.RUnlock()
+		return nil, fmt.Errorf("module is closed")
+	}
 	key, ok := m.peerKeys[string(remoteX25519)]
-	m.peerKeysMu.RUnlock()
-
 	if !ok {
+		m.peerKeysMu.RUnlock()
 		return nil, fmt.Errorf("no shared key for peer: call DeriveSharedKey first")
 	}
+	// Copy key before releasing lock to prevent TOCTOU race with RemovePeerKey
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
+	m.peerKeysMu.RUnlock()
 
-	return Decrypt(key, ciphertext, nil)
+	// Zero the copy after use
+	defer SecureZero(keyCopy)
+
+	return Decrypt(keyCopy, ciphertext, nil)
 }
 
 // EncryptWithKey encrypts plaintext using a provided key.
@@ -202,10 +242,19 @@ func (m *Module) DecryptWithKey(key, ciphertext []byte) ([]byte, error) {
 // This should be called when the Module is no longer needed.
 // After Close is called, the Module should not be used.
 func (m *Module) Close() {
-	// Clear all cached peer keys first
-	m.ClearPeerKeys()
+	m.peerKeysMu.Lock()
+	defer m.peerKeysMu.Unlock()
 
-	// Zero the private keys
+	// Mark as closed to prevent concurrent operations
+	m.closed = true
+
+	// Clear all cached peer keys
+	for _, key := range m.peerKeys {
+		SecureZero(key)
+	}
+	m.peerKeys = make(map[string][]byte)
+
+	// Zero the private keys while holding lock
 	// Note: ed25519.PrivateKey is []byte, so we can zero it directly
 	SecureZero(m.ed25519Private)
 	SecureZero(m.x25519Private)

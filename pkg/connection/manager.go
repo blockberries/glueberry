@@ -447,12 +447,14 @@ func (m *Manager) reconnectionLoop(ctx context.Context, peerID peer.ID, reconnSt
 		// Calculate next delay
 		backoff.ScheduleNext(reconnState)
 
-		// Wait for the backoff delay
+		// Wait for the backoff delay using time.NewTimer to avoid timer leaks
+		timer := time.NewTimer(reconnState.CurrentDelay)
 		select {
 		case <-ctx.Done():
-			// Reconnection cancelled
+			// Reconnection cancelled - stop timer to release resources
+			timer.Stop()
 			return
-		case <-time.After(reconnState.CurrentDelay):
+		case <-timer.C:
 			// Backoff elapsed, proceed with attempt
 		}
 

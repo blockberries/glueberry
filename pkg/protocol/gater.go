@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"sync"
+
 	"github.com/libp2p/go-libp2p/core/connmgr"
 	"github.com/libp2p/go-libp2p/core/control"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -26,6 +28,7 @@ type ConnectionStateChecker interface {
 type ConnectionGater struct {
 	checker      BlacklistChecker
 	stateChecker ConnectionStateChecker
+	mu           sync.RWMutex
 }
 
 // NewConnectionGater creates a new connection gater with the given blacklist checker.
@@ -36,7 +39,9 @@ func NewConnectionGater(checker BlacklistChecker) *ConnectionGater {
 // SetStateChecker sets the connection state checker for deduplication.
 // This is set after construction to avoid circular dependencies.
 func (g *ConnectionGater) SetStateChecker(checker ConnectionStateChecker) {
+	g.mu.Lock()
 	g.stateChecker = checker
+	g.mu.Unlock()
 }
 
 // InterceptPeerDial is called before dialing a peer.
@@ -68,8 +73,11 @@ func (g *ConnectionGater) InterceptSecured(dir network.Direction, p peer.ID, add
 
 	// Connection deduplication: if we receive an incoming connection from a peer
 	// we're already trying to connect to, reject it. First to complete wins.
-	if dir == network.DirInbound && g.stateChecker != nil {
-		if g.stateChecker.IsConnecting(p) {
+	if dir == network.DirInbound {
+		g.mu.RLock()
+		stateChecker := g.stateChecker
+		g.mu.RUnlock()
+		if stateChecker != nil && stateChecker.IsConnecting(p) {
 			// We're already dialing this peer - reject incoming, our outbound will complete first
 			return false
 		}

@@ -666,7 +666,9 @@ func (n *Node) EstablishEncryptedStreams(
 // registerIncomingStreamHandlers registers protocol handlers for incoming encrypted streams.
 func (n *Node) registerIncomingStreamHandlers(streamNames []string) {
 	for _, streamName := range streamNames {
-		protoID := protocol.StreamProtocolID(streamName)
+		// Capture loop variable for closure (Go closure capture bug prevention)
+		name := streamName
+		protoID := protocol.StreamProtocolID(name)
 
 		// Create handler for this stream
 		handler := func(stream network.Stream) {
@@ -674,7 +676,7 @@ func (n *Node) registerIncomingStreamHandlers(streamNames []string) {
 
 			// Accept the incoming stream
 			// The stream manager will check for shared key and allowed streams
-			if err := n.streamManager.HandleIncomingStream(remotePeerID, streamName, stream); err != nil {
+			if err := n.streamManager.HandleIncomingStream(remotePeerID, name, stream); err != nil {
 				// Failed to create encrypted stream (no shared key or not allowed)
 				_ = stream.Reset() // Ignore error - error path
 				return
@@ -1026,6 +1028,7 @@ func (n *Node) forwardEvents() {
 // SubscribeEvents creates a new event subscription that receives all events.
 // The caller should call Unsubscribe() when done to clean up resources.
 // The subscription's channel is closed when Unsubscribe() is called or when the node stops.
+// Returns nil if the node has already stopped.
 func (n *Node) SubscribeEvents() *EventSubscription {
 	ch := make(chan ConnectionEvent, n.config.EventBufferSize)
 	ctx, cancel := context.WithCancel(n.ctx)
@@ -1044,6 +1047,13 @@ func (n *Node) SubscribeEvents() *EventSubscription {
 	}()
 
 	n.eventSubsMu.Lock()
+	// Check if node has stopped (eventSubs set to nil in forwardEvents defer)
+	if n.eventSubs == nil {
+		n.eventSubsMu.Unlock()
+		cancel()
+		close(ch)
+		return nil
+	}
 	n.eventSubs[sub] = struct{}{}
 	n.eventSubsMu.Unlock()
 
@@ -1096,6 +1106,7 @@ func (f EventFilter) matches(evt ConnectionEvent) bool {
 // FilteredEvents creates a new subscription that receives only events matching the filter.
 // The caller should call Unsubscribe() when done to clean up resources.
 // The subscription's channel is closed when Unsubscribe() is called or when the node stops.
+// Returns nil if the node has already stopped.
 //
 // This method creates a new subscriber that receives a copy of all events,
 // so it can be used together with Events() without conflict. Each call to
@@ -1103,6 +1114,10 @@ func (f EventFilter) matches(evt ConnectionEvent) bool {
 func (n *Node) FilteredEvents(filter EventFilter) *EventSubscription {
 	// Create base subscription
 	baseSub := n.SubscribeEvents()
+	if baseSub == nil {
+		// Node has stopped
+		return nil
+	}
 
 	// Create filtered channel
 	filtered := make(chan ConnectionEvent, n.config.EventBufferSize)

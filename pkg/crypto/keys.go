@@ -32,6 +32,9 @@ func Ed25519PrivateToX25519(edPriv ed25519.PrivateKey) ([]byte, error) {
 	// Hash the seed with SHA-512
 	h := sha512.Sum512(seed)
 
+	// Zero the hash after extracting the key material
+	defer SecureZero(h[:])
+
 	// Take first 32 bytes and apply clamping for X25519
 	x25519Priv := make([]byte, X25519KeySize)
 	copy(x25519Priv, h[:32])

@@ -61,6 +61,7 @@ func New(path string) (*Book, error) {
 // AddPeer adds or updates a peer in the address book.
 // If the peer already exists, it updates the multiaddrs and metadata.
 // Returns an error if the peer is blacklisted.
+// The addrs slice and metadata map are copied to prevent external modification.
 func (b *Book) AddPeer(peerID peer.ID, addrs []multiaddr.Multiaddr, metadata map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -68,22 +69,34 @@ func (b *Book) AddPeer(peerID peer.ID, addrs []multiaddr.Multiaddr, metadata map
 	key := peerID.String()
 	now := time.Now()
 
+	// Make defensive copies to prevent external modification
+	addrsCopy := make([]multiaddr.Multiaddr, len(addrs))
+	copy(addrsCopy, addrs)
+
+	var metadataCopy map[string]string
+	if metadata != nil {
+		metadataCopy = make(map[string]string, len(metadata))
+		for k, v := range metadata {
+			metadataCopy[k] = v
+		}
+	}
+
 	if existing, ok := b.peers[key]; ok {
 		if existing.Blacklisted {
 			return fmt.Errorf("cannot update blacklisted peer %s", peerID)
 		}
 		// Update existing entry
-		existing.Multiaddrs = addrs
-		if metadata != nil {
-			existing.Metadata = metadata
+		existing.Multiaddrs = addrsCopy
+		if metadataCopy != nil {
+			existing.Metadata = metadataCopy
 		}
 		existing.UpdatedAt = now
 	} else {
 		// Create new entry
 		b.peers[key] = &PeerEntry{
 			PeerID:     peerID,
-			Multiaddrs: addrs,
-			Metadata:   metadata,
+			Multiaddrs: addrsCopy,
+			Metadata:   metadataCopy,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}

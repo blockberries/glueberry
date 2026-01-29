@@ -311,6 +311,157 @@ All tests pass with race detection enabled:
 
 ---
 
+## Fifth Iteration - January 2026
+
+A comprehensive deep-dive review was performed using parallel specialized agents focusing on crypto, connection, streams, node/config, addressbook, protocol handlers, and internal utilities.
+
+### Bug Fixes Applied
+
+#### 19. Closure Variable Capture Bug in Stream Handler Registration (CRITICAL)
+
+**File:** `/node.go`
+
+**Issue:** The `registerIncomingStreamHandlers` function had a classic Go closure bug where the loop variable `streamName` was captured by reference in the handler closure. All handlers would use the value from the last iteration, causing all incoming streams to be handled with the wrong stream name.
+
+**Fix:** Added explicit variable capture with `name := streamName` before creating the closure.
+
+**Impact:** Critical - All incoming encrypted stream handlers would use the wrong stream name, breaking multi-stream communication.
+
+---
+
+#### 20. TOCTOU Race in Module.Encrypt/Decrypt (CRITICAL)
+
+**File:** `/pkg/crypto/module.go`
+
+**Issue:** The `Encrypt` and `Decrypt` methods retrieved the key under lock but used it after releasing the lock. If `RemovePeerKey` was called concurrently, it would zero the key via `SecureZero(key)` while the encryption/decryption was in progress, corrupting the operation.
+
+**Fix:** Copy the key before releasing the lock, then zero the copy after use with `defer SecureZero(keyCopy)`.
+
+**Impact:** Critical - Could cause encryption with zeroed key, completely compromising confidentiality.
+
+---
+
+#### 21. Data Race in Module.Close() (CRITICAL)
+
+**File:** `/pkg/crypto/module.go`
+
+**Issue:** The `Close()` method zeroed `x25519Private` without holding any lock, while `DeriveSharedKeyFromX25519` could be reading it concurrently. This violated the data race safety guarantees documented for the Module type.
+
+**Fix:** Added `closed` flag to Module struct. `Close()` now acquires the lock before setting `closed = true` and zeroing private keys. All methods that access private keys check the `closed` flag and copy private key data while holding the lock.
+
+**Impact:** Critical - Data race on private key material, undefined behavior.
+
+---
+
+#### 22. Nil Map Panic in SubscribeEvents After Stop (CRITICAL)
+
+**File:** `/node.go`
+
+**Issue:** When the node stopped, `forwardEvents()` set `n.eventSubs = nil`. If `SubscribeEvents()` was called after the node stopped, it would attempt to write to a nil map, causing a panic.
+
+**Fix:** Added nil check for `n.eventSubs` in `SubscribeEvents()`. Returns nil if the node has stopped. Updated `FilteredEvents()` to handle nil return.
+
+**Impact:** Critical - Application crash if subscriptions created after node stops.
+
+---
+
+#### 23. SHA-512 Hash Not Zeroed After Key Derivation (HIGH)
+
+**File:** `/pkg/crypto/keys.go`
+
+**Issue:** In `Ed25519PrivateToX25519`, the SHA-512 hash containing sensitive key material was not zeroed after use. The first 32 bytes are the X25519 private key.
+
+**Fix:** Added `defer SecureZero(h[:])` to zero the hash after extracting key material.
+
+**Impact:** High - Key material persisted in memory longer than necessary.
+
+---
+
+#### 24. X25519 Private Key Not Zeroed on Error (HIGH)
+
+**File:** `/pkg/crypto/module.go`
+
+**Issue:** In `NewModule`, if `Ed25519PublicToX25519` failed after successfully deriving the X25519 private key, the private key was not zeroed before returning the error.
+
+**Fix:** Added `SecureZero(x25519Priv)` before returning the error.
+
+**Impact:** High - Key material leaked on error path.
+
+---
+
+#### 25. Data Race in ConnectionGater.SetStateChecker (HIGH)
+
+**File:** `/pkg/protocol/gater.go`
+
+**Issue:** `SetStateChecker` wrote to `g.stateChecker` without synchronization, while `InterceptSecured` read it concurrently. This is a data race.
+
+**Fix:** Added `sync.RWMutex` to ConnectionGater. `SetStateChecker` acquires write lock, `InterceptSecured` acquires read lock when accessing `stateChecker`.
+
+**Impact:** High - Data race, potential crashes or undefined behavior.
+
+---
+
+#### 26. AddPeer Storing External References Without Copying (HIGH)
+
+**File:** `/pkg/addressbook/book.go`
+
+**Issue:** `AddPeer` stored the provided `addrs` slice and `metadata` map directly without making defensive copies. External callers could modify these after the call, corrupting the internal state of the address book.
+
+**Fix:** Added defensive copies of both the `addrs` slice and `metadata` map before storing.
+
+**Impact:** High - Internal state corruption possible via external modification.
+
+---
+
+#### 27. Flow Controller Callback Invoked While Holding Lock (HIGH)
+
+**File:** `/internal/flow/controller.go`
+
+**Issue:** The `onBlocked` callback was invoked while holding `fc.mu`. If the callback attempted to access any Controller method, it would deadlock.
+
+**Fix:** Capture callback and shouldCallback flag while holding lock, then invoke callback after releasing lock.
+
+**Impact:** High - Potential deadlock if callback accesses controller.
+
+---
+
+#### 28. Timer Leak in reconnectionLoop (MEDIUM)
+
+**File:** `/pkg/connection/manager.go`
+
+**Issue:** Used `time.After()` in a select statement with cancellation. When context was cancelled, the timer resources weren't released until the timer fired.
+
+**Fix:** Changed to `time.NewTimer()` with explicit `timer.Stop()` when context is cancelled.
+
+**Impact:** Medium - Timer resource leaks during shutdown.
+
+---
+
+### Issues Reviewed and Deemed Not Fixed (Lower Priority)
+
+The following issues remain from previous iterations:
+
+1. **Flow Controller Cleanup**: The `flowControllers` map grows unbounded.
+2. **Prometheus Label Cardinality**: Stream names as metric labels could cause cardinality explosion.
+3. **Address Book flushLoop/Close() Race**: Minor race - goroutine not waited for.
+4. **Unbounded m.connections map**: Connection entries never removed except on shutdown.
+5. **PeerStatsTracker StreamStats map unbounded**: Similar to flowControllers.
+
+---
+
+## Test Results
+
+All tests pass with race detection enabled:
+- `go test -race ./...` - All packages pass
+- `go build ./...` - Clean build
+- `golangci-lint run` - No issues
+
+## Dependency Status
+
+- `github.com/blockberries/cramberry v1.5.3` - Latest version (verified January 2026)
+
+---
+
 ## Recommendations for Future Reviews
 
 1. **Key Material Handling:** Always verify that any code creating `Cipher` instances calls `Close()` appropriately, and that raw ECDH shared secrets are zeroed.
@@ -322,3 +473,7 @@ All tests pass with race detection enabled:
 7. **RWMutex for Read-Heavy Operations:** Use `RWMutex` instead of `Mutex` for structures where reads vastly outnumber writes (like `IsClosed()` checks).
 8. **Plaintext Zeroing:** Always zero decrypted/plaintext data when it's no longer needed, especially on error paths and when messages are dropped.
 9. **Lock Scope in Registration:** When registering connections, hold the lock through state transitions to prevent race conditions with concurrent operations.
+10. **Closure Variable Capture:** Always explicitly capture loop variables in closures with a local variable assignment.
+11. **Key Copy Before Use:** When using cached key material, copy it before releasing the lock and zero the copy after use.
+12. **Defensive Copies:** Make defensive copies of slices and maps passed to public APIs to prevent external mutation.
+13. **Callback Invocation:** Invoke callbacks outside of locks to prevent deadlocks.

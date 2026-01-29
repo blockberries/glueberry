@@ -81,14 +81,19 @@ func (fc *Controller) Acquire(ctx context.Context) error {
 			fc.pending++
 
 			// Check if we just hit the high watermark
+			var shouldCallback bool
 			if fc.pending >= fc.highWatermark && !fc.blocked {
 				fc.blocked = true
-				if fc.onBlocked != nil {
-					fc.onBlocked()
-				}
+				shouldCallback = fc.onBlocked != nil
 			}
+			callback := fc.onBlocked
 
 			fc.mu.Unlock()
+
+			// Invoke callback outside of lock to prevent deadlock
+			if shouldCallback && callback != nil {
+				callback()
+			}
 			return nil
 		}
 
