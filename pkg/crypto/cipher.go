@@ -3,6 +3,7 @@ package crypto
 import (
 	"crypto/rand"
 	"fmt"
+	"sync"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -26,6 +27,7 @@ const (
 // cannot be zeroed from outside the package. The Close() method zeros our
 // copy for defense in depth.
 type Cipher struct {
+	mu     sync.Mutex
 	aead   cipher
 	key    []byte // Our copy for zeroing on Close
 	closed bool
@@ -66,13 +68,20 @@ func NewCipher(key []byte) (*Cipher, error) {
 // The additionalData parameter provides authenticated but unencrypted data.
 // Pass nil if no additional data is needed.
 func (c *Cipher) Encrypt(plaintext, additionalData []byte) ([]byte, error) {
-	// Generate a random nonce
+	// Generate nonce before acquiring lock (crypto/rand is thread-safe)
 	nonce := make([]byte, NonceSize)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
-	return c.encryptWithNonce(nonce, plaintext, additionalData)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil, fmt.Errorf("cipher is closed")
+	}
+
+	return c.encryptWithNonceLocked(nonce, plaintext, additionalData)
 }
 
 // encryptWithNonce encrypts the plaintext using the provided nonce.
@@ -82,6 +91,19 @@ func (c *Cipher) Encrypt(plaintext, additionalData []byte) ([]byte, error) {
 //
 // The returned data format is: [12-byte nonce][ciphertext][16-byte tag]
 func (c *Cipher) encryptWithNonce(nonce, plaintext, additionalData []byte) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil, fmt.Errorf("cipher is closed")
+	}
+
+	return c.encryptWithNonceLocked(nonce, plaintext, additionalData)
+}
+
+// encryptWithNonceLocked is the internal encryption method.
+// Caller must hold the mutex.
+func (c *Cipher) encryptWithNonceLocked(nonce, plaintext, additionalData []byte) ([]byte, error) {
 	if len(nonce) != NonceSize {
 		return nil, fmt.Errorf("invalid nonce size: expected %d bytes, got %d", NonceSize, len(nonce))
 	}
@@ -110,6 +132,13 @@ func (c *Cipher) Decrypt(data, additionalData []byte) ([]byte, error) {
 			NonceSize+TagSize, len(data))
 	}
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil, fmt.Errorf("cipher is closed")
+	}
+
 	// Extract nonce from the beginning
 	nonce := data[:NonceSize]
 	ciphertext := data[NonceSize:]
@@ -125,11 +154,15 @@ func (c *Cipher) Decrypt(data, additionalData []byte) ([]byte, error) {
 
 // Close zeros the key material stored in this cipher.
 // After Close is called, the cipher should not be used.
+// This method is thread-safe and idempotent.
 //
 // Note: The underlying chacha20poly1305 library also stores a copy of the key
 // internally which cannot be zeroed from outside the package. This method
 // zeros our copy for defense in depth.
 func (c *Cipher) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.closed {
 		return
 	}
@@ -141,6 +174,8 @@ func (c *Cipher) Close() {
 
 // IsClosed returns true if the cipher has been closed.
 func (c *Cipher) IsClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.closed
 }
 

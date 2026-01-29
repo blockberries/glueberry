@@ -11,6 +11,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+	libp2pprotocol "github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -147,7 +148,7 @@ func (h *Host) Connectedness(peerID peer.ID) network.Connectedness {
 
 // SetStreamHandler registers a handler for a protocol.
 func (h *Host) SetStreamHandler(protoID string, handler network.StreamHandler) {
-	h.host.SetStreamHandler(HandshakeProtocolID, handler)
+	h.host.SetStreamHandler(libp2pprotocol.ID(protoID), handler)
 }
 
 // SetStreamHandlerForProtocol registers a handler for a specific protocol ID.

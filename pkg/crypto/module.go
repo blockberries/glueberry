@@ -58,9 +58,11 @@ func NewModule(privateKey ed25519.PrivateKey) (*Module, error) {
 	}, nil
 }
 
-// Ed25519PublicKey returns the node's Ed25519 public key.
+// Ed25519PublicKey returns a copy of the node's Ed25519 public key.
 func (m *Module) Ed25519PublicKey() ed25519.PublicKey {
-	return m.ed25519Public
+	result := make(ed25519.PublicKey, len(m.ed25519Public))
+	copy(result, m.ed25519Public)
+	return result
 }
 
 // X25519PublicKey returns the node's X25519 public key for key exchange.

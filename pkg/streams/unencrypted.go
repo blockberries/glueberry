@@ -32,6 +32,7 @@ type UnencryptedStream struct {
 
 	incoming         chan<- IncomingMessage
 	onMessageDropped MessageDroppedCallback
+	callbackMu       sync.RWMutex
 	ctx              context.Context
 	cancel           context.CancelFunc
 
@@ -69,10 +70,11 @@ func NewUnencryptedStream(
 }
 
 // SetOnMessageDropped sets the callback to be called when a message is dropped
-// due to the incoming channel being full. This must be called immediately after
-// NewUnencryptedStream and before any messages are received.
+// due to the incoming channel being full. This method is thread-safe.
 func (us *UnencryptedStream) SetOnMessageDropped(callback MessageDroppedCallback) {
+	us.callbackMu.Lock()
 	us.onMessageDropped = callback
+	us.callbackMu.Unlock()
 }
 
 // Send sends data over the stream without encryption.
@@ -181,8 +183,11 @@ func (us *UnencryptedStream) readLoop() {
 			return
 		default:
 			// Channel full - drop message to prevent blocking
-			if us.onMessageDropped != nil {
-				us.onMessageDropped(us.peerID, us.name)
+			us.callbackMu.RLock()
+			callback := us.onMessageDropped
+			us.callbackMu.RUnlock()
+			if callback != nil {
+				callback(us.peerID, us.name)
 			}
 		}
 	}

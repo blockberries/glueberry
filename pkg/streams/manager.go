@@ -286,8 +286,8 @@ func (m *Manager) openUnencryptedStreamLazilyCtx(ctx context.Context, peerID pee
 	// Check if another goroutine created a stream while we were doing I/O
 	if peerStreams, ok := m.unencryptedStreams[peerID]; ok {
 		if existingStream, exists := peerStreams[streamName]; exists && !existingStream.IsClosed() {
-			// Another goroutine beat us - close our stream and use theirs
-			_ = rawStream.Close()
+			// Another goroutine beat us - close our stream (including read goroutine) and use theirs
+			_ = unencStream.Close()
 			return existingStream, nil
 		}
 	}

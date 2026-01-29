@@ -477,3 +477,106 @@ All tests pass with race detection enabled:
 11. **Key Copy Before Use:** When using cached key material, copy it before releasing the lock and zero the copy after use.
 12. **Defensive Copies:** Make defensive copies of slices and maps passed to public APIs to prevent external mutation.
 13. **Callback Invocation:** Invoke callbacks outside of locks to prevent deadlocks.
+
+---
+
+## Sixth Iteration - January 2026
+
+A comprehensive deep-dive review was performed using parallel specialized agents focusing on crypto, connection, streams, node/config, addressbook, and protocol handlers.
+
+### Dependency Update
+
+Updated `github.com/blockberries/cramberry` from v1.5.3 to v1.5.5. All tests pass with the updated dependency.
+
+### Bug Fixes Applied
+
+#### 29. Race Condition in Cipher Type (CONCURRENCY - MEDIUM)
+
+**File:** `/pkg/crypto/cipher.go`
+
+**Issue:** The `Cipher` type was documented as "safe for concurrent use" but had no synchronization. Multiple goroutines calling `Encrypt`, `Decrypt`, or `Close` concurrently could cause data races on the internal state.
+
+**Fix:** Added `sync.Mutex` to serialize access to the cipher. The `Encrypt` method generates the nonce (crypto/rand is thread-safe) before acquiring the lock to minimize lock contention. All methods (`Encrypt`, `Decrypt`, `Close`, `IsClosed`) now properly acquire the lock. Added `closed` flag to prevent operations after close.
+
+**Impact:** Medium - Data race on concurrent cipher operations.
+
+---
+
+#### 30. Goroutine Leak in openUnencryptedStreamLazilyCtx (RESOURCE LEAK - MEDIUM)
+
+**File:** `/pkg/streams/manager.go`
+
+**Issue:** When a stream was opened concurrently and another goroutine won the race, the code called `rawStream.Close()` instead of `unencStream.Close()`. This left the read goroutine spawned by `NewUnencryptedStream` running indefinitely, causing a goroutine leak.
+
+**Fix:** Changed `rawStream.Close()` to `unencStream.Close()` at line 291 to properly clean up the UnencryptedStream including its read goroutine.
+
+**Impact:** Medium - Goroutine accumulation over time in high-concurrency scenarios.
+
+---
+
+#### 31. Data Race on onMessageDropped Callback (CONCURRENCY - MEDIUM)
+
+**File:** `/pkg/streams/unencrypted.go`
+
+**Issue:** The `onMessageDropped` callback field was read in `readLoop()` and written in `SetOnMessageDropped()` without synchronization, causing a data race if the callback was set while the read loop was running.
+
+**Fix:** Added `callbackMu sync.RWMutex` to protect access to the `onMessageDropped` callback. `SetOnMessageDropped` acquires write lock, `readLoop` acquires read lock when accessing the callback.
+
+**Impact:** Medium - Data race, potential crashes or undefined behavior.
+
+---
+
+#### 32. Ed25519PublicKey Returns Internal State (API SAFETY - LOW)
+
+**File:** `/pkg/crypto/module.go`
+
+**Issue:** The `Ed25519PublicKey()` method returned the internal `m.ed25519Public` slice directly. Since Go slices are reference types, callers could potentially modify the module's internal state.
+
+**Fix:** Changed to return a copy of the public key by creating a new slice and copying the data.
+
+**Impact:** Low - Defensive copy for API safety, prevents accidental internal state modification.
+
+---
+
+#### 33. SetStreamHandler Ignores protoID Parameter (FUNCTIONALITY - LOW)
+
+**File:** `/pkg/protocol/host.go`
+
+**Issue:** The `SetStreamHandler` method accepted a `protoID` parameter but was calling `StreamProtocolID(proto)` with a nonexistent `proto` variable (dead code path that compiled due to shadowing). The actual `protoID` parameter was being ignored.
+
+**Fix:** Fixed to use `libp2pprotocol.ID(protoID)` to properly convert and use the provided protocol ID string.
+
+**Impact:** Low - Dead code bug, but would cause incorrect behavior if this method was used directly.
+
+---
+
+### Issues Remaining (Lower Priority)
+
+The following issues remain from previous iterations:
+
+1. **Flow Controller Cleanup**: The `flowControllers` map grows unbounded.
+2. **Prometheus Label Cardinality**: Stream names as metric labels could cause cardinality explosion.
+3. **Address Book flushLoop/Close() Race**: Minor race - goroutine not waited for.
+4. **Unbounded m.connections map**: Connection entries never removed except on shutdown.
+5. **PeerStatsTracker StreamStats map unbounded**: Similar to flowControllers.
+
+---
+
+## Test Results
+
+All tests pass with race detection enabled:
+- `go test -race ./...` - All packages pass
+- `go build ./...` - Clean build
+- `golangci-lint run` - No issues
+
+## Dependency Status
+
+- `github.com/blockberries/cramberry v1.5.5` - Latest version (verified January 2026)
+
+---
+
+## Recommendations for Future Reviews
+
+14. **Cipher Thread Safety:** When documenting types as "safe for concurrent use", always include proper synchronization primitives.
+15. **Stream Cleanup:** When closing a stream wrapper, always close the wrapper (not the raw stream) to ensure all background goroutines are properly cleaned up.
+16. **Callback Synchronization:** Protect callback fields with RWMutex when they can be set concurrently with their invocation.
