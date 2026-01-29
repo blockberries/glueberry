@@ -33,12 +33,16 @@ func generateLoadTestKey(b *testing.B) ed25519.PrivateKey {
 }
 
 // loadToCryptoKey converts ed25519 public key to libp2p crypto key.
+//
+//nolint:unused // Benchmark utility for future load tests
 func loadToCryptoKey(pub ed25519.PublicKey) libp2pcrypto.PubKey {
 	key, _ := libp2pcrypto.UnmarshalEd25519PublicKey(pub)
 	return key
 }
 
 // generateLoadPeerID creates a peer ID from an ed25519 private key.
+//
+//nolint:unused // Benchmark utility for future load tests
 func generateLoadPeerID(b *testing.B) peer.ID {
 	b.Helper()
 	priv := generateLoadTestKey(b)

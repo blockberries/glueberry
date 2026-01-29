@@ -807,7 +807,11 @@ func (n *Node) MessagesSent(peerID peer.ID) uint64 {
 	count := tracker.messagesSent
 	tracker.mu.RUnlock()
 
-	return uint64(count)
+	// Defensive: ensure non-negative before unsigned conversion
+	if count < 0 {
+		return 0
+	}
+	return uint64(count) //nolint:gosec // count verified non-negative above
 }
 
 // AllPeerStatistics returns statistics for all peers with recorded stats.

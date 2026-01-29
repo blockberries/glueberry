@@ -146,22 +146,26 @@ func (c *Cipher) IsClosed() bool {
 
 // Encrypt is a convenience function that encrypts plaintext with the given key.
 // It creates a temporary cipher, encrypts the data, and returns the result.
+// The cipher is closed after encryption to zero key material.
 // For multiple encryptions with the same key, create a Cipher instance instead.
 func Encrypt(key, plaintext, additionalData []byte) ([]byte, error) {
 	c, err := NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
+	defer c.Close()
 	return c.Encrypt(plaintext, additionalData)
 }
 
 // Decrypt is a convenience function that decrypts data with the given key.
 // It creates a temporary cipher, decrypts the data, and returns the result.
+// The cipher is closed after decryption to zero key material.
 // For multiple decryptions with the same key, create a Cipher instance instead.
 func Decrypt(key, data, additionalData []byte) ([]byte, error) {
 	c, err := NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
+	defer c.Close()
 	return c.Decrypt(data, additionalData)
 }

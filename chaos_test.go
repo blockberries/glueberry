@@ -21,6 +21,8 @@ import (
 // the library's resilience and error handling.
 
 // chaosStream wraps a stream to inject various failure modes.
+//
+//nolint:unused // Test utility for future chaos tests
 type chaosStream struct {
 	network.Stream
 
@@ -36,6 +38,7 @@ type chaosStream struct {
 	mu sync.Mutex
 }
 
+//nolint:unused // Test utility for future chaos tests
 func (cs *chaosStream) Read(p []byte) (n int, err error) {
 	cs.mu.Lock()
 	delay := cs.readDelay
@@ -53,6 +56,7 @@ func (cs *chaosStream) Read(p []byte) (n int, err error) {
 	return cs.Stream.Read(p)
 }
 
+//nolint:unused // Test utility for future chaos tests
 func (cs *chaosStream) Write(p []byte) (n int, err error) {
 	cs.mu.Lock()
 	delay := cs.writeDelay
@@ -70,6 +74,7 @@ func (cs *chaosStream) Write(p []byte) (n int, err error) {
 	return cs.Stream.Write(p)
 }
 
+//nolint:unused // Test utility for future chaos tests
 func (cs *chaosStream) Close() error {
 	cs.mu.Lock()
 	closeErr := cs.closeErr
@@ -81,24 +86,28 @@ func (cs *chaosStream) Close() error {
 	return cs.Stream.Close()
 }
 
+//nolint:unused // Test utility for future chaos tests
 func (cs *chaosStream) SetReadDelay(d time.Duration) {
 	cs.mu.Lock()
 	cs.readDelay = d
 	cs.mu.Unlock()
 }
 
+//nolint:unused // Test utility for future chaos tests
 func (cs *chaosStream) SetWriteDelay(d time.Duration) {
 	cs.mu.Lock()
 	cs.writeDelay = d
 	cs.mu.Unlock()
 }
 
+//nolint:unused // Test utility for future chaos tests
 func (cs *chaosStream) SetReadError(err error) {
 	cs.mu.Lock()
 	cs.readErr = err
 	cs.mu.Unlock()
 }
 
+//nolint:unused // Test utility for future chaos tests
 func (cs *chaosStream) SetWriteError(err error) {
 	cs.mu.Lock()
 	cs.writeErr = err
@@ -595,6 +604,8 @@ func TestChaos_LatencyInjection(t *testing.T) {
 
 // flakyReader simulates an unreliable reader that occasionally returns errors
 // or delays for chaos testing.
+//
+//nolint:unused // Test utility for future chaos tests
 type flakyReader struct {
 	inner      io.Reader
 	errorRate  float64
@@ -602,12 +613,13 @@ type flakyReader struct {
 	callCount  int64
 }
 
+//nolint:unused // Test utility for future chaos tests
 func (fr *flakyReader) Read(p []byte) (n int, err error) {
 	atomic.AddInt64(&fr.callCount, 1)
 
 	// Simulate occasional delays
 	if fr.delayRange > 0 {
-		delay := time.Duration(atomic.LoadInt64(&fr.callCount) % 10) * fr.delayRange / 10
+		delay := time.Duration(atomic.LoadInt64(&fr.callCount)%10) * fr.delayRange / 10
 		time.Sleep(delay)
 	}
 

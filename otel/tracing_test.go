@@ -16,7 +16,7 @@ func TestNewTracer(t *testing.T) {
 	// Test with nil provider (should use noop)
 	tracer := NewTracer(nil)
 	if tracer == nil {
-		t.Error("NewTracer(nil) returned nil")
+		t.Fatal("NewTracer(nil) returned nil")
 	}
 	if tracer.tracer == nil {
 		t.Error("tracer.tracer is nil")
@@ -206,32 +206,32 @@ func TestNopTracer(t *testing.T) {
 	}
 	span.End()
 
-	ctx, span = tracer.StartDial(context.Background(), peerID)
+	_, span = tracer.StartDial(context.Background(), peerID)
 	span.End()
 
-	ctx, span = tracer.StartHandshake(context.Background(), peerID)
+	_, span = tracer.StartHandshake(context.Background(), peerID)
 	tracer.RecordHandshakeResult(span, "success", nil)
 	span.End()
 
-	ctx, span = tracer.StartKeyDerivation(context.Background(), peerID)
+	_, span = tracer.StartKeyDerivation(context.Background(), peerID)
 	span.End()
 
-	ctx, span = tracer.StartStreamSetup(context.Background(), peerID, "data")
+	_, span = tracer.StartStreamSetup(context.Background(), peerID, "data")
 	span.End()
 
-	ctx, span = tracer.StartSend(context.Background(), peerID, "data", 100)
+	_, span = tracer.StartSend(context.Background(), peerID, "data", 100)
 	tracer.EndSpan(span, nil)
 
-	ctx, span = tracer.StartEncrypt(context.Background(), 100)
+	_, span = tracer.StartEncrypt(context.Background(), 100)
 	span.End()
 
-	ctx, span = tracer.StartReceive(context.Background(), peerID, "data")
+	_, span = tracer.StartReceive(context.Background(), peerID, "data")
 	span.End()
 
-	ctx, span = tracer.StartDecrypt(context.Background())
+	_, span = tracer.StartDecrypt(context.Background())
 	span.End()
 
-	ctx, span = tracer.StartDisconnect(context.Background(), peerID)
+	_, span = tracer.StartDisconnect(context.Background(), peerID)
 	tracer.RecordError(span, errors.New("test error"))
 	tracer.EndSpan(span, errors.New("test"))
 }
@@ -251,8 +251,10 @@ func TestTracer_AllSpanTypes(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "Connect",
-			startFn:  func() (context.Context, trace.Span) { return tracer.StartConnect(context.Background(), peerID, "outbound") },
+			name: "Connect",
+			startFn: func() (context.Context, trace.Span) {
+				return tracer.StartConnect(context.Background(), peerID, "outbound")
+			},
 			expected: SpanConnect,
 		},
 		{
@@ -271,13 +273,17 @@ func TestTracer_AllSpanTypes(t *testing.T) {
 			expected: SpanKeyDerive,
 		},
 		{
-			name:     "StreamSetup",
-			startFn:  func() (context.Context, trace.Span) { return tracer.StartStreamSetup(context.Background(), peerID, "data") },
+			name: "StreamSetup",
+			startFn: func() (context.Context, trace.Span) {
+				return tracer.StartStreamSetup(context.Background(), peerID, "data")
+			},
 			expected: SpanStreamSetup,
 		},
 		{
-			name:     "Send",
-			startFn:  func() (context.Context, trace.Span) { return tracer.StartSend(context.Background(), peerID, "data", 100) },
+			name: "Send",
+			startFn: func() (context.Context, trace.Span) {
+				return tracer.StartSend(context.Background(), peerID, "data", 100)
+			},
 			expected: SpanSend,
 		},
 		{

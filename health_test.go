@@ -128,10 +128,10 @@ func TestHealthStatus_Fields(t *testing.T) {
 
 func TestBoolToMessage(t *testing.T) {
 	tests := []struct {
-		b       bool
-		trueMsg string
+		b        bool
+		trueMsg  string
 		falseMsg string
-		want    string
+		want     string
 	}{
 		{true, "yes", "no", "yes"},
 		{false, "yes", "no", "no"},

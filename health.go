@@ -170,7 +170,8 @@ func HealthHandler(node *Node) http.Handler {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 
-		json.NewEncoder(w).Encode(status)
+		// Ignore encode error - nothing we can do if client disconnected
+		_ = json.NewEncoder(w).Encode(status)
 	})
 }
 
@@ -191,10 +192,10 @@ func LivenessHandler(node *Node) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		if healthy {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"healthy":true}`))
+			_, _ = w.Write([]byte(`{"healthy":true}`))
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"healthy":false}`))
+			_, _ = w.Write([]byte(`{"healthy":false}`))
 		}
 	})
 }

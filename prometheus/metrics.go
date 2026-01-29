@@ -78,11 +78,11 @@ const DefaultNamespace = "glueberry"
 // Metrics is safe for concurrent use.
 type Metrics struct {
 	// Connection metrics
-	connectionsOpened *prometheus.CounterVec
-	connectionsClosed *prometheus.CounterVec
+	connectionsOpened  *prometheus.CounterVec
+	connectionsClosed  *prometheus.CounterVec
 	connectionAttempts *prometheus.CounterVec
-	handshakeDuration prometheus.Histogram
-	handshakeResults  *prometheus.CounterVec
+	handshakeDuration  prometheus.Histogram
+	handshakeResults   *prometheus.CounterVec
 
 	// Stream metrics
 	messagesSent     *prometheus.CounterVec
