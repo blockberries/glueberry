@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.10] - 2026-01-29
+
+### Changed
+- Updated Cramberry dependency to v1.5.5
+
+### Fixed
+- **Medium**: Fixed race condition in `Cipher` type - was documented as thread-safe but had no synchronization
+- **Medium**: Fixed goroutine leak in stream manager when concurrent stream creation races occurred
+- **Medium**: Fixed data race on `onMessageDropped` callback in unencrypted streams
+- **Low**: `Ed25519PublicKey()` now returns a copy to prevent external mutation of internal state
+- **Low**: Fixed `SetStreamHandler` to actually use the `protoID` parameter (was being ignored)
+
 ## [1.2.9] - 2026-01-28
 
 ### Changed
