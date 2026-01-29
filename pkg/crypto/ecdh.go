@@ -54,12 +54,17 @@ func ComputeX25519SharedSecret(localPrivate, remotePublic []byte) ([]byte, error
 // DeriveSharedKey derives a symmetric encryption key from X25519 private and public keys.
 // It performs ECDH to get a shared secret, then uses HKDF-SHA256 to derive the final key.
 // The optional salt can be used for domain separation; if nil, an empty salt is used.
+// The raw shared secret is securely zeroed after use to prevent key material from
+// persisting in memory.
 func DeriveSharedKey(localPrivate, remotePublic []byte, salt []byte) ([]byte, error) {
 	// Compute raw shared secret via X25519
 	sharedSecret, err := ComputeX25519SharedSecret(localPrivate, remotePublic)
 	if err != nil {
 		return nil, err
 	}
+	// Always zero the raw shared secret after deriving the final key.
+	// This is critical for security: the raw ECDH output should never persist in memory.
+	defer SecureZero(sharedSecret)
 
 	// Derive the final key using HKDF
 	return deriveKeyFromSecret(sharedSecret, salt)

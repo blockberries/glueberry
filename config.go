@@ -205,6 +205,7 @@ func (c *Config) Validate() error {
 }
 
 // applyDefaults sets default values for any unset optional fields.
+// It also ensures watermark relationships are valid after applying defaults.
 func (c *Config) applyDefaults() {
 	if c.HandshakeTimeout == 0 {
 		c.HandshakeTimeout = DefaultHandshakeTimeout
@@ -253,6 +254,23 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MaxMetadataSize == 0 {
 		c.MaxMetadataSize = DefaultMaxMetadataSize
+	}
+
+	// Ensure watermark relationships are valid after applying defaults.
+	// This handles the case where a user sets only one watermark value
+	// (e.g., HighWatermark=50) and the default for the other (LowWatermark=100)
+	// would create an invalid relationship.
+	if c.LowWatermark >= c.HighWatermark {
+		c.LowWatermark = c.HighWatermark / 10
+		if c.LowWatermark < 1 {
+			c.LowWatermark = 1
+		}
+	}
+	if c.ConnMgrLowWatermark >= c.ConnMgrHighWatermark {
+		c.ConnMgrLowWatermark = c.ConnMgrHighWatermark / 4
+		if c.ConnMgrLowWatermark < 1 {
+			c.ConnMgrLowWatermark = 1
+		}
 	}
 }
 

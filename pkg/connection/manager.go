@@ -175,13 +175,16 @@ func (m *Manager) ConnectCtx(ctx context.Context, peerID peer.ID) error {
 	}
 	defer cancel()
 
-	// Also respect the manager's context
+	// Also respect the manager's context.
+	// The goroutine exits when either context is done, ensuring no leak.
 	go func() {
 		select {
 		case <-m.ctx.Done():
-			cancel()
 		case <-connectCtx.Done():
 		}
+		// Always call cancel to release resources, regardless of which context fired.
+		// This is safe even if already cancelled.
+		cancel()
 	}()
 
 	if err := m.host.Connect(connectCtx, addrInfo); err != nil {
@@ -513,12 +516,17 @@ func (m *Manager) attemptReconnect(peerID peer.ID) error {
 }
 
 // scheduleReconnectAfterCooldown schedules reconnection after cooldown expires.
+// Uses time.NewTimer instead of time.After to allow proper cleanup when
+// the manager context is cancelled before the cooldown expires.
 func (m *Manager) scheduleReconnectAfterCooldown(peerID peer.ID, cooldown time.Duration) {
 	go func() {
+		timer := time.NewTimer(cooldown)
+		defer timer.Stop() // Ensure timer resources are released
+
 		select {
 		case <-m.ctx.Done():
 			return
-		case <-time.After(cooldown):
+		case <-timer.C:
 			// Cooldown expired, transition to disconnected and start reconnection
 			m.mu.Lock()
 			if conn, exists := m.connections[peerID]; exists {
@@ -630,20 +638,21 @@ func (m *Manager) SetSharedKey(peerID peer.ID, key []byte) error {
 
 // MarkEstablished transitions a connection to the Established state.
 // This should be called after encrypted streams are successfully set up.
+// The operation is atomic - the handshake timeout is cancelled and state
+// transitioned while holding the lock to prevent TOCTOU races.
 func (m *Manager) MarkEstablished(peerID peer.ID) error {
-	m.mu.RLock()
+	m.mu.Lock()
 	conn, exists := m.connections[peerID]
-	m.mu.RUnlock()
-
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("peer %s not connected", peerID)
 	}
 
-	// Cancel handshake timeout
+	// Cancel handshake timeout while holding lock to prevent race
+	// where connection could be cleaned up between check and cancel
 	conn.CancelHandshakeTimeout()
 
 	// Transition to established
-	m.mu.Lock()
 	err := conn.TransitionTo(StateEstablished)
 	m.mu.Unlock()
 
@@ -717,16 +726,18 @@ func (m *Manager) AutoConnect(peerID peer.ID) {
 
 // CancelHandshakeTimeout cancels the handshake timeout for a peer.
 // This is called when CompleteHandshake is invoked.
+// The operation holds the lock to prevent TOCTOU races where the
+// connection could be cleaned up between the existence check and cancel.
 func (m *Manager) CancelHandshakeTimeout(peerID peer.ID) error {
-	m.mu.RLock()
+	m.mu.Lock()
 	conn, exists := m.connections[peerID]
-	m.mu.RUnlock()
-
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("peer %s not connected", peerID)
 	}
 
 	conn.CancelHandshakeTimeout()
+	m.mu.Unlock()
 	return nil
 }
 

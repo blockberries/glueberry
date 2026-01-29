@@ -36,7 +36,7 @@ type UnencryptedStream struct {
 	cancel           context.CancelFunc
 
 	closed   bool
-	closeMu  sync.Mutex
+	closeMu  sync.RWMutex
 	closeErr error
 }
 
@@ -92,12 +92,12 @@ func (us *UnencryptedStream) SendCtx(ctx context.Context, data []byte) error {
 	default:
 	}
 
-	us.closeMu.Lock()
+	us.closeMu.RLock()
 	if us.closed {
-		us.closeMu.Unlock()
+		us.closeMu.RUnlock()
 		return fmt.Errorf("stream is closed")
 	}
-	us.closeMu.Unlock()
+	us.closeMu.RUnlock()
 
 	// Check context again after checking closed state
 	select {
@@ -189,13 +189,19 @@ func (us *UnencryptedStream) readLoop() {
 }
 
 // Close closes the unencrypted stream and stops the read goroutine.
+// This method is thread-safe and idempotent - calling it multiple times
+// from concurrent goroutines is safe.
 func (us *UnencryptedStream) Close() error {
 	us.closeMu.Lock()
 	if us.closed {
+		// Already closed, return the stored error
 		err := us.closeErr
 		us.closeMu.Unlock()
 		return err
 	}
+	// Mark as closed atomically with the check to prevent race where
+	// multiple goroutines pass the closed check before any sets it.
+	us.closed = true
 	us.closeMu.Unlock()
 
 	// Cancel context to stop read loop
@@ -204,7 +210,11 @@ func (us *UnencryptedStream) Close() error {
 	// Close the underlying stream
 	err := us.stream.Close()
 
-	us.markClosed(err)
+	// Record the close error (we already set closed=true above)
+	us.closeMu.Lock()
+	us.closeErr = err
+	us.closeMu.Unlock()
+
 	return err
 }
 
@@ -221,8 +231,8 @@ func (us *UnencryptedStream) markClosed(err error) {
 
 // IsClosed returns true if the stream is closed.
 func (us *UnencryptedStream) IsClosed() bool {
-	us.closeMu.Lock()
-	defer us.closeMu.Unlock()
+	us.closeMu.RLock()
+	defer us.closeMu.RUnlock()
 	return us.closed
 }
 
