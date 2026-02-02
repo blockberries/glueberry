@@ -44,18 +44,18 @@ test-short: ## Run tests without race detection (faster)
 benchmark: bench ## Alias for bench
 
 bench: ## Run benchmarks
-	$(GO) test $(BENCHFLAGS) ./benchmark/...
+	$(GO) test $(BENCHFLAGS) ./test/benchmark/...
 	$(GO) test $(BENCHFLAGS) ./pkg/crypto/...
 
 bench-crypto: ## Run crypto benchmarks only
-	$(GO) test $(BENCHFLAGS) ./benchmark/... -run='^$$'
+	$(GO) test $(BENCHFLAGS) ./test/benchmark/... -run='^$$'
 	$(GO) test $(BENCHFLAGS) ./pkg/crypto/... -run='^$$'
 
 bench-all: ## Run all benchmarks across all packages
 	$(GO) test $(BENCHFLAGS) $(PKG) -run='^$$'
 
 bench-compare: ## Show instructions for benchmark comparison
-	@echo "Run 'go test -bench=. -benchmem ./benchmark/... > new.txt' to create a baseline"
+	@echo "Run 'go test -bench=. -benchmem ./test/benchmark/... > new.txt' to create a baseline"
 	@echo "Then run 'benchstat old.txt new.txt' to compare"
 
 ## Code quality targets
@@ -84,48 +84,48 @@ coverage: test ## Generate HTML coverage report
 
 fuzz: ## Run all fuzz tests (use FUZZTIME=60s to override duration)
 	@echo "Running all fuzz tests for $(FUZZTIME)..."
-	$(GO) test -fuzz=FuzzDecrypt -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzDecryptRoundTrip -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzNewCipher -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzAddressBookJSON -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzMessageIterator -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzHandshakeMessageParsing -fuzztime=$(FUZZTIME) ./fuzz/
+	$(GO) test -fuzz=FuzzDecrypt -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzDecryptRoundTrip -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzNewCipher -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzAddressBookJSON -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzMessageIterator -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzHandshakeMessageParsing -fuzztime=$(FUZZTIME) ./test/fuzz/
 
 fuzz-crypto: ## Run crypto-related fuzz tests
 	@echo "Running crypto fuzz tests for $(FUZZTIME)..."
-	$(GO) test -fuzz=FuzzDecrypt -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzDecryptRoundTrip -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzEd25519PublicToX25519 -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzEd25519PrivateToX25519 -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzNewCipher -fuzztime=$(FUZZTIME) ./fuzz/
+	$(GO) test -fuzz=FuzzDecrypt -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzDecryptRoundTrip -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzEd25519PublicToX25519 -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzEd25519PrivateToX25519 -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzNewCipher -fuzztime=$(FUZZTIME) ./test/fuzz/
 
 fuzz-addressbook: ## Run address book fuzz tests
 	@echo "Running address book fuzz tests for $(FUZZTIME)..."
-	$(GO) test -fuzz=FuzzAddressBookJSON -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzPeerEntryJSON -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzMultiaddrParsing -fuzztime=$(FUZZTIME) ./fuzz/
+	$(GO) test -fuzz=FuzzAddressBookJSON -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzPeerEntryJSON -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzMultiaddrParsing -fuzztime=$(FUZZTIME) ./test/fuzz/
 
 fuzz-cramberry: ## Run Cramberry message fuzz tests
 	@echo "Running Cramberry message fuzz tests for $(FUZZTIME)..."
-	$(GO) test -fuzz=FuzzMessageIterator -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzStreamReaderVarint -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzStreamReaderString -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzStreamReaderBytes -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzStreamWriterReader -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzDelimitedMessages -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzMarshalUnmarshal -fuzztime=$(FUZZTIME) ./fuzz/
+	$(GO) test -fuzz=FuzzMessageIterator -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzStreamReaderVarint -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzStreamReaderString -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzStreamReaderBytes -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzStreamWriterReader -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzDelimitedMessages -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzMarshalUnmarshal -fuzztime=$(FUZZTIME) ./test/fuzz/
 
 fuzz-handshake: ## Run handshake protocol fuzz tests
 	@echo "Running handshake protocol fuzz tests for $(FUZZTIME)..."
-	$(GO) test -fuzz=FuzzHandshakeMessageParsing -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzHandshakeDelimited -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzHandshakeMessageRoundTrip -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzCryptoMaterial -fuzztime=$(FUZZTIME) ./fuzz/
-	$(GO) test -fuzz=FuzzMultipleHandshakeMessages -fuzztime=$(FUZZTIME) ./fuzz/
+	$(GO) test -fuzz=FuzzHandshakeMessageParsing -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzHandshakeDelimited -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzHandshakeMessageRoundTrip -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzCryptoMaterial -fuzztime=$(FUZZTIME) ./test/fuzz/
+	$(GO) test -fuzz=FuzzMultipleHandshakeMessages -fuzztime=$(FUZZTIME) ./test/fuzz/
 
 fuzz-list: ## List all available fuzz targets
 	@echo "Available fuzz targets:"
-	@$(GO) test -list='Fuzz.*' ./fuzz/ 2>/dev/null | grep -E '^Fuzz'
+	@$(GO) test -list='Fuzz.*' ./test/fuzz/ 2>/dev/null | grep -E '^Fuzz'
 
 ## Utility targets
 

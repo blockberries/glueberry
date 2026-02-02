@@ -1,6 +1,6 @@
-// Package testing provides testing utilities for applications that use Glueberry.
+// Package testutil provides testing utilities for applications that use Glueberry.
 // It includes mock implementations and helpers for unit testing.
-package testing
+package testutil
 
 import (
 	"context"
