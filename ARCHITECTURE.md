@@ -1066,3 +1066,17 @@ High/low watermark backpressure prevents memory exhaustion from fast producers.
 |---------|------|---------|
 | 1.0.0 | 2026-01-26 | Initial release |
 | 1.0.1 | 2026-01-26 | Stress tests, cramberry v1.2.0 |
+
+---
+
+## Ecosystem References
+
+Glueberry is part of the Blockberries ecosystem. For complete integration documentation:
+
+- **[../ECOSYSTEM.md](../ECOSYSTEM.md)** - Complete ecosystem architecture and integration guide
+- **[../raspberry/ARCHITECTURE.md](../raspberry/ARCHITECTURE.md)** - Blockchain node using Glueberry for P2P
+- **[../blockberry/ARCHITECTURE.md](../blockberry/ARCHITECTURE.md)** - Node framework built on Glueberry
+- **[../looseberry/ARCHITECTURE.md](../looseberry/ARCHITECTURE.md)** - DAG mempool using Glueberry streams
+- **[../leaderberry/ARCHITECTURE.md](../leaderberry/ARCHITECTURE.md)** - BFT consensus using Glueberry
+- **[../punnet-sdk/ARCHITECTURE.md](../punnet-sdk/ARCHITECTURE.md)** - Application module framework
+- **[../cramberry/ARCHITECTURE.md](../cramberry/ARCHITECTURE.md)** - Binary serialization used by Glueberry
